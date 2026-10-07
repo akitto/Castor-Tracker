@@ -1,0 +1,32 @@
+name: Déploiement Supabase (homelab)
+
+# La PWA est reconstruite par Coolify à chaque push sur main (dépôt relié à l'application).
+# Ce workflow applique les migrations et déploie la fonction castor-jobs : il tourne sur un
+# runner auto-hébergé installé sur l'hôte Coolify (accès Docker), avec un .env local.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/**'
+      - 'packages/core/src/**'
+      - 'scripts/**'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-supabase
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: vars.CASTOR_DEPLOY_ENABLED == 'true'
+    runs-on: [self-hosted, homelab]
+    env:
+      ENV_FILE: ${{ vars.CASTOR_ENV_FILE || '/opt/castor/.env' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Migrations SQL
+        run: bash scripts/configure-supabase.sh --migrations-only
+      - name: Edge Function castor-jobs
+        run: bash scripts/deploy-functions.sh
+      - name: Secrets, planification et vérification
+        run: bash scripts/configure-supabase.sh < /dev/null

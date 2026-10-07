@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+# Copie générée du moteur pour les Edge Functions (scripts/sync-core.mjs)
+supabase/functions/_shared/core/
+.admin-password
+supabase/tests/function/node_modules/

@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  app:
+    name: Moteur, typage et build de la PWA
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:coverage
+      - run: pnpm typecheck
+      - run: pnpm build
+
+  database:
+    name: Migrations, droits et fonction castor-jobs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Postgres local, migrations, tests RLS et test de bout en bout de la fonction
+        run: RUN_FUNCTIONS=1 bash scripts/test-db.sh
+      - name: Typage et lint de la fonction
+        run: |
+          node scripts/sync-core.mjs
+          cd supabase/functions
+          deno check --config deno.json castor-jobs/index.ts
+          deno lint --config deno.json castor-jobs/

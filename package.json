@@ -1,0 +1,24 @@
+{
+  "name": "castor-tracker",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.28.0",
+  "scripts": {
+    "dev": "pnpm --filter @castor/web dev",
+    "build": "pnpm --filter @castor/web build",
+    "test": "pnpm --filter @castor/core test",
+    "test:coverage": "pnpm --filter @castor/core test:coverage",
+    "test:db": "bash scripts/test-db.sh",
+    "test:functions": "RUN_FUNCTIONS=1 bash scripts/test-db.sh",
+    "typecheck": "pnpm -r typecheck",
+    "core:sync": "node scripts/sync-core.mjs",
+    "db:types": "GEN_TYPES=1 bash scripts/test-db.sh",
+    "check:functions": "node scripts/sync-core.mjs && cd supabase/functions && deno check --config deno.json castor-jobs/index.ts",
+    "db:configure": "bash scripts/configure-supabase.sh",
+    "functions:deploy": "bash scripts/deploy-functions.sh",
+    "backup": "bash scripts/backup.sh"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

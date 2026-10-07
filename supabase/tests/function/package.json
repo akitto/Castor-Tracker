@@ -1,0 +1,9 @@
+{
+  "name": "castor-function-tests",
+  "private": true,
+  "type": "module",
+  "description": "Doublure PostgREST/GoTrue pour tester castor-jobs en local.",
+  "dependencies": {
+    "pg": "8.23.1"
+  }
+}

@@ -1,0 +1,8 @@
+**/node_modules
+**/dist
+**/coverage
+.git
+.env
+.env.*
+supabase/functions/_shared/core
+supabase/tests/function/node_modules
