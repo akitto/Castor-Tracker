@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Configure l'instance Supabase de Castor Tracker. Idempotent : relançable à chaque mise à jour.
 #   1. applique les migrations SQL non encore appliquées (suivi dans castor_meta.migrations) ;
-#   2. écrit les secrets Vault (URL des fonctions, secret des tâches planifiées, clé anon) ;
+#   2. écrit les secrets Vault (URL des fonctions, secret des tâches planifiées, clé publique) ;
 #   3. renseigne l'adresse du site, (re)crée les tâches pg_cron, recharge le schéma PostgREST ;
 #   4. crée le premier administrateur (ADMIN_EMAIL) s'il n'existe pas ;
 #   5. vérifie la fonction castor-jobs et lance la reprise de l'historique si la base est vide.
 # Usage : bash scripts/configure-supabase.sh [--migrations-only] [--rotate-secret]
+# Supabase Cloud : DATABASE_URL (connexion « Session pooler »), SUPABASE_PUBLISHABLE_KEY, SUPABASE_SECRET_KEY ;
+# en auto-hébergement : DB_CONTAINER (ou DATABASE_URL), SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -31,6 +33,17 @@ say() { printf '\033[1m→ %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m! %s\033[0m\n' "$*" >&2; }
 die() { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
+# Clés d'API : nouvelles clés de Supabase Cloud (publishable / secret) ou clés historiques (anon / service_role).
+SUPABASE_ANON_KEY="${SUPABASE_PUBLISHABLE_KEY:-${SUPABASE_ANON_KEY:-}}"
+SUPABASE_SERVICE_ROLE_KEY="${SUPABASE_SECRET_KEY:-${SUPABASE_SERVICE_ROLE_KEY:-}}"
+
+# En-têtes d'authentification d'une clé : apikey toujours, Bearer seulement pour une clé JWT
+# (les clés sb_publishable_… / sb_secret_… ne sont pas des JWT et seraient refusées en Bearer).
+auth_args() {
+  AUTH_ARGS=(-H "apikey: $1")
+  case "$1" in eyJ*) AUTH_ARGS+=(-H "Authorization: Bearer $1") ;; esac
+}
+
 psql_cmd() {
   if [ -n "${DATABASE_URL:-}" ]; then
     psql "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 "$@"
@@ -52,6 +65,7 @@ psql_cmd -c "select 1" >/dev/null || die "connexion impossible"
 
 say "migrations"
 psql_cmd <<'SQL'
+set client_min_messages = warning;
 create schema if not exists castor_meta;
 revoke all on schema castor_meta from public;
 create table if not exists castor_meta.migrations (
@@ -79,7 +93,7 @@ psql_cmd -c "notify pgrst, 'reload schema';" >/dev/null
 [ "$MIGRATIONS_ONLY" = "1" ] && { say "migrations à jour"; exit 0; }
 
 : "${SUPABASE_URL:?SUPABASE_URL manquant dans $ENV_FILE}"
-: "${SUPABASE_ANON_KEY:?SUPABASE_ANON_KEY manquant dans $ENV_FILE}"
+: "${SUPABASE_ANON_KEY:?clé publique manquante : SUPABASE_PUBLISHABLE_KEY (ou SUPABASE_ANON_KEY) dans $ENV_FILE}"
 SUPABASE_URL="${SUPABASE_URL%/}"
 FUNCTIONS_URL="${CASTOR_FUNCTIONS_URL:-$SUPABASE_URL/functions/v1}"
 
@@ -118,9 +132,10 @@ select coalesce((select id::text from auth.users where lower(email) = :'email' l
 SQL
 )"
   if [ -z "$uid" ]; then
-    : "${SUPABASE_SERVICE_ROLE_KEY:?SUPABASE_SERVICE_ROLE_KEY requis pour créer le compte administrateur}"
     if [ -n "${ADMIN_PASSWORD:-}" ]; then
       password="$ADMIN_PASSWORD"
+    elif [ -n "${CI:-}" ]; then
+      die "compte $email introuvable : le créer dans Supabase (Authentication › Users › Add user), puis relancer"
     elif [ -t 0 ]; then
       read -rsp "  mot de passe (12 caractères min.) : " password; echo
     else
@@ -131,10 +146,11 @@ SQL
       echo "  mot de passe généré et écrit dans $ROOT/.admin-password (à supprimer après la première connexion)"
     fi
     [ "${#password}" -ge 12 ] || die "mot de passe trop court"
+    [ -n "$SUPABASE_SERVICE_ROLE_KEY" ] || die "SUPABASE_SECRET_KEY (ou SUPABASE_SERVICE_ROLE_KEY) requis pour créer le compte administrateur"
     escaped="$(printf '%s' "$password" | sed 's/\\/\\\\/g; s/"/\\"/g')"
     body="$(printf '{"email":"%s","password":"%s","email_confirm":true}' "$email" "$escaped")"
-    response="$(curl -sS -X POST "$SUPABASE_URL/auth/v1/admin/users" \
-      -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+    auth_args "$SUPABASE_SERVICE_ROLE_KEY"
+    response="$(curl -sS -X POST "$SUPABASE_URL/auth/v1/admin/users" "${AUTH_ARGS[@]}" \
       -H 'Content-Type: application/json' -d "$body")"
     uid="$(printf '%s' "$response" | sed -n 's/.*"id":"\([0-9a-f-]\{36\}\)".*/\1/p' | head -1)"
     [ -n "$uid" ] || die "création du compte refusée : $response"
@@ -147,8 +163,9 @@ SQL
 fi
 
 say "fonction castor-jobs"
-# Jeton anon joint : nécessaire si le service functions vérifie les JWT (VERIFY_JWT=true).
-if curl -fsS --max-time 10 -H "Authorization: Bearer $SUPABASE_ANON_KEY" "$SUPABASE_URL/functions/v1/castor-jobs" >/dev/null 2>&1; then
+# Clé publique jointe : nécessaire si le service functions vérifie les JWT (VERIFY_JWT=true en auto-hébergement).
+auth_args "$SUPABASE_ANON_KEY"
+if curl -fsS --max-time 10 "${AUTH_ARGS[@]}" "$SUPABASE_URL/functions/v1/castor-jobs" >/dev/null 2>&1; then
   echo "  en ligne"
   count="$(sql_value -c 'select count(*) from public.stock_prices')"
   if [ "$count" = "0" ]; then
@@ -156,6 +173,6 @@ if curl -fsS --max-time 10 -H "Authorization: Bearer $SUPABASE_ANON_KEY" "$SUPAB
     echo "  base vide : reprise de l’historique lancée (résultat dans Admin › Journal des tâches)"
   fi
 else
-  warn "castor-jobs ne répond pas : lancer scripts/deploy-functions.sh puis relancer ce script"
+  warn "castor-jobs ne répond pas : déployer la fonction (workflow « Supabase Cloud », ou scripts/deploy-functions.sh en auto-hébergement) puis relancer ce script"
 fi
 say "configuration terminée"

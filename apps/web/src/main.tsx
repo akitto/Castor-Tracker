@@ -12,11 +12,13 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App';
 import { AuthProvider } from './lib/auth';
+import { CONFIGURED } from './lib/config';
 
 const queryClient = new QueryClient({
   defaultOptions: {
     // offlineFirst : la requête part même hors ligne, le service worker répond depuis son cache.
-    queries: { networkMode: 'offlineFirst', staleTime: 60_000, retry: 1, refetchOnWindowFocus: true },
+    // Sans configuration (URL et clé absentes), aucune requête : la PWA affiche « Configuration absente ».
+    queries: { enabled: CONFIGURED, networkMode: 'offlineFirst', staleTime: 60_000, retry: 1, refetchOnWindowFocus: true },
     mutations: { networkMode: 'offlineFirst' },
   },
 });

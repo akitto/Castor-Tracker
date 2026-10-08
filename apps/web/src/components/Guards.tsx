@@ -12,8 +12,8 @@ function Unconfigured() {
   return (
     <main className="page">
       <div className="notice notice--warn">
-        Configuration absente : l’URL de l’API et la clé publique (anon) ne sont pas définies. Renseigner
-        SUPABASE_URL et SUPABASE_ANON_KEY dans le conteneur web (voir le README).
+        Configuration absente : l’URL de l’API et la clé publique ne sont pas définies. Renseigner
+        SUPABASE_URL et SUPABASE_PUBLISHABLE_KEY dans les variables du conteneur web, puis redémarrer (voir le README).
       </div>
     </main>
   );

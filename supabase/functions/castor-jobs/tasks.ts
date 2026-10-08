@@ -710,17 +710,44 @@ function hashSeed(text: string): number {
   return h >>> 0;
 }
 
+/**
+ * Budget de calcul du rejeu. Supabase Cloud coupe une fonction après 2 s de CPU par requête.
+ * Coût mesuré d'un point rejoué : 0,9 ms fixes + 1,1 µs par tirage (24 quadrimestres × 60 jours × 1 000 tirages
+ * = 2,8 s ; 720 points × 400 tirages = 0,95 s). On vise 0,6 s pour laisser la place au reste de la tâche.
+ */
+export const REPLAY_CPU_MS = 600;
+const REPLAY_MIN_SIMS = 400;
+
+export function replayCostMs(points: number, nSims: number): number {
+  return points * (0.9 + nSims * 0.0011);
+}
+
+/** Ramène d'abord les tirages à 400, puis espace les jours rejoués, jusqu'à tenir dans le budget. */
+export function fitReplayBudget(references: number, daysBefore: number, nSims: number, step: number) {
+  const points = (s: number) => references * Math.ceil(daysBefore / s);
+  let sims = nSims;
+  let pace = step;
+  if (replayCostMs(points(pace), sims) > REPLAY_CPU_MS) sims = Math.min(sims, REPLAY_MIN_SIMS);
+  while (replayCostMs(points(pace), sims) > REPLAY_CPU_MS && pace < daysBefore) pace++;
+  return { nSims: sims, step: pace, reduced: sims !== nSims || pace !== step };
+}
+
 const replayTask: TaskDef = {
   cron: true,
   async run(ctx) {
     const market = await loadMarket(ctx.db);
-    const nSims = Math.min(5000, Math.max(200, Number(ctx.body.nSims ?? 1000)));
+    const references = referencesOf(market, ['known', 'inferred']);
     const daysBefore = Math.min(120, Math.max(5, Number(ctx.body.daysBefore ?? 60)));
-    const step = Math.min(10, Math.max(1, Number(ctx.body.step ?? 1)));
+    const { nSims, step, reduced } = fitReplayBudget(
+      references.length,
+      daysBefore,
+      Math.min(5000, Math.max(200, Number(ctx.body.nSims ?? 1000))),
+      Math.min(10, Math.max(1, Number(ctx.body.step ?? 1))),
+    );
     // RG-14 : couverture de l'intervalle à 90 %, de J−60 à J−1, date du CA connue.
     const report = replayEstimates({
       sessions: market.sessions,
-      references: referencesOf(market, ['known', 'inferred']),
+      references,
       params: market.estimateParams,
       dividends: market.dividends,
       calendar: market.calendar,
@@ -780,9 +807,10 @@ const replayTask: TaskDef = {
       }
     }
     const coverage = report.coverage === null ? '—' : `${fr(report.coverage * 100, 1)} %`;
+    const pace = reduced ? ` (budget de calcul : ${nSims} tirages, un jour sur ${step})` : '';
     return {
-      message: `couverture de l’intervalle à 90 % : ${coverage} sur ${report.n} points ; ${replayed.length} quadrimestre(s) rejoué(s)`,
-      details: { coverage: report.coverage, buckets: report.buckets, replayed, skipped: [...report.skipped, ...skipped] },
+      message: `couverture de l’intervalle à 90 % : ${coverage} sur ${report.n} points${pace} ; ${replayed.length} quadrimestre(s) rejoué(s)`,
+      details: { coverage: report.coverage, buckets: report.buckets, replayed, skipped: [...report.skipped, ...skipped], nSims, step },
     };
   },
 };

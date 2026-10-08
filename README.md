@@ -22,6 +22,8 @@ Proxy Coolify (Traefik, Let's Encrypt)
 Sources de cours : Yahoo Finance DG.PA (principale), Euronext Live (contrôle), import CSV (secours)
 ```
 
+Pour les essais, la partie Supabase peut être un projet Supabase Cloud au lieu du service Coolify (voir « Mise en service »).
+
 Aucun worker à maintenir : pg_cron déclenche la fonction via pg_net, le back-office l'appelle directement.
 Le même moteur de calcul (`packages/core`) sert à la fonction et au simulateur de la PWA.
 
@@ -50,75 +52,117 @@ pnpm test:functions     # + test de bout en bout de castor-jobs (Deno requis)
 pnpm db:types           # régénère packages/core/src/database.ts après une migration
 ```
 
-PWA en local contre une instance : créer `apps/web/.env.local` avec `VITE_SUPABASE_URL` et `VITE_SUPABASE_ANON_KEY`,
-puis `pnpm dev`.
+PWA en local contre une instance : créer `apps/web/.env.local` avec `VITE_SUPABASE_URL` et `VITE_SUPABASE_ANON_KEY`
+(clé publishable ou anon), puis `pnpm dev`.
 
 Prix de référence sur cours réels (REC-01) : déposer un export des cours bruts DG.PA (format Euronext ou Yahoo) dans
 `packages/core/test/fixtures/dg-pa.csv` ; le test `reference.test.ts` recalcule alors les cinq prix officiels au centime.
 
-## Mise en service sur Coolify
+## Mise en service
 
-> Ne jamais coller de clé ni de mot de passe dans un chat ou un ticket : les scripts lisent un `.env` local.
+> Ne jamais coller de clé ni de mot de passe dans un chat ou un ticket : ils vont dans les réglages GitHub,
+> les variables Coolify ou un `.env` local, jamais dans le dépôt.
 
-### 1. Supabase
+La base et la fonction tournent soit sur **Supabase Cloud** (le plus simple, recommandé pour les essais), soit sur
+un **Supabase auto-hébergé** dans Coolify. La PWA est toujours une application Coolify.
+
+### A. Supabase Cloud
+
+1. **Projet** : supabase.com › *New project*, région Paris (`eu-west-3`), mot de passe de base généré
+   (lettres et chiffres seulement : il entre tel quel dans une URL).
+2. **Authentification** :
+   - *Authentication › Sign In / Providers* : désactiver « Allow new users to sign up » (accès sur invitation),
+     garder le fournisseur Email ;
+   - *Authentication › URL Configuration* : Site URL `https://castor.<domaine>`, Redirect URLs
+     `https://castor.<domaine>/**` ;
+   - *Authentication › Users › Add user › Create new user* : e-mail et mot de passe de l'administrateur,
+     « Auto Confirm User » coché.
+3. **Réglages du dépôt GitHub** (*Settings › Secrets and variables › Actions*) :
+
+   | Nom | Type | Valeur |
+   | --- | --- | --- |
+   | `SUPABASE_PROJECT_REF` | variable | identifiant du projet, celui de `https://<ref>.supabase.co` |
+   | `SUPABASE_PUBLISHABLE_KEY` | variable | *Settings › API Keys* : Publishable key (`sb_publishable_…`) |
+   | `SITE_URL` | variable | `https://castor.<domaine>` |
+   | `SUPABASE_SECRET_KEY` | secret | *Settings › API Keys* : Secret key (`sb_secret_…`) |
+   | `SUPABASE_DB_URL` | secret | bouton *Connect* › Session pooler › URI, `[YOUR-PASSWORD]` remplacé |
+   | `SUPABASE_ACCESS_TOKEN` | secret | *Account › Access Tokens › Generate new token* |
+   | `ADMIN_EMAIL` | secret | e-mail du compte créé à l'étape 2 (en secret : les journaux d'un dépôt public sont publics) |
+
+4. **Déploiement** : *Actions › Supabase Cloud › Run workflow*. Le workflow déploie `castor-jobs`
+   (`--no-verify-jwt` : la fonction contrôle elle-même ses appels), applique les migrations, écrit les secrets Vault,
+   crée les tâches pg_cron, donne le rôle admin au compte `ADMIN_EMAIL` et lance la reprise de l'historique.
+   Il se relance seul à chaque push qui touche `supabase/` ou le moteur.
+5. **E-mails** (facultatif) : *Authentication › Emails* : coller les modèles de `apps/web/public/email/`
+   (code à 6 chiffres pour se connecter depuis l'application installée).
+
+Limite du cloud : une Edge Function dispose de 2 s de CPU par appel. Le rejeu (REC-05) réduit seul ses tirages et
+espace les jours rejoués pour tenir dans ce budget ; le message de la tâche l'indique.
+
+### B. Supabase auto-hébergé (Coolify)
 
 1. Coolify › *New resource* › *Service* › **Supabase**.
-2. Domaine du service **Kong** : `https://api.castor.<domaine>`. Retirer le domaine public de **Studio** (ou le
-   protéger) : Studio ne doit pas être exposé sur Internet.
-3. Variables du service d'authentification (éditeur de compose, service `supabase-auth`) :
-   - inscriptions fermées : `GOTRUE_DISABLE_SIGNUP=true` (variable `DISABLE_SIGNUP` du modèle) ; garder le
-     fournisseur e-mail actif ;
-   - `GOTRUE_SITE_URL=https://castor.<domaine>` et `GOTRUE_URI_ALLOW_LIST=https://castor.<domaine>/**` ;
-   - SMTP (facultatif mais nécessaire au lien magique et aux invitations par e-mail) ;
-   - modèles d'e-mail en français, servis par la PWA (le code à 6 chiffres permet de se connecter depuis
-     l'application installée) :
+   - Domaine du service **Kong** : `https://api.castor.<domaine>`. Retirer le domaine public de **Studio** (ou le
+     protéger) : Studio ne doit pas être exposé sur Internet.
+   - Si le déploiement échoue sur `minio/mc` (images MinIO retirées de Docker Hub en septembre 2026) : dans
+     *Edit Compose File*, service `minio-createbucket`, remplacer l'image par celle du serveur
+     `ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z`, qui contient `mc`.
+   - Variables du service d'authentification (`supabase-auth`) : inscriptions fermées
+     (`GOTRUE_DISABLE_SIGNUP=true`), `GOTRUE_SITE_URL=https://castor.<domaine>`,
+     `GOTRUE_URI_ALLOW_LIST=https://castor.<domaine>/**`, SMTP, et modèles d'e-mail servis par la PWA :
      `GOTRUE_MAILER_TEMPLATES_MAGIC_LINK=https://castor.<domaine>/email/magic-link.html`,
      `GOTRUE_MAILER_TEMPLATES_INVITE=https://castor.<domaine>/email/invite.html`,
      `GOTRUE_MAILER_TEMPLATES_RECOVERY=https://castor.<domaine>/email/recovery.html`.
-4. Le service Edge Functions reçoit déjà `SUPABASE_URL` et `SUPABASE_SERVICE_ROLE_KEY` : rien à ajouter.
-   La fonction contrôle elle-même ses appels (secret Vault pour pg_cron, JWT admin + TOTP pour le back-office).
+2. Sur l'hôte Coolify :
 
-### 2. Fonction et base (sur l'hôte Coolify)
+   ```bash
+   git clone https://github.com/akitto/Castor-Tracker.git /opt/castor-tracker && cd /opt/castor-tracker
+   cp .env.example .env && chmod 600 .env   # renseigner les valeurs (clés du service Supabase dans Coolify)
+   bash scripts/deploy-functions.sh          # copie castor-jobs dans le volume functions et redémarre le service
+   bash scripts/configure-supabase.sh        # migrations, Vault, pg_cron, premier admin, reprise de l'historique
+   ```
 
-```bash
-git clone <dépôt> /opt/castor-tracker && cd /opt/castor-tracker
-cp .env.example .env && chmod 600 .env   # renseigner les valeurs (clés du service Supabase dans Coolify)
-bash scripts/deploy-functions.sh          # copie castor-jobs dans le volume functions et redémarre le service
-bash scripts/configure-supabase.sh        # migrations, Vault, pg_cron, premier admin, reprise de l'historique
-```
-
-`configure-supabase.sh` est idempotent : il ne rejoue que les migrations nouvelles (suivies dans
+`configure-supabase.sh` est idempotent (A et B) : il ne rejoue que les migrations nouvelles (suivies dans
 `castor_meta.migrations`), crée le secret des tâches planifiées dans Vault (`--rotate-secret` pour le renouveler),
 (re)crée les six tâches pg_cron et lance la reprise de l'historique si la base de cours est vide.
 
-### 3. PWA
+### C. PWA (Coolify)
 
-Coolify › *New resource* › *Application* depuis le dépôt :
+Coolify › *New resource* › *Application* › *Public Repository* : `https://github.com/akitto/Castor-Tracker`,
+branche `main`.
 
-- build pack **Dockerfile**, répertoire de base `/`, Dockerfile `apps/web/Dockerfile`, port 80 ;
-- domaine `https://castor.<domaine>`, healthcheck `/healthz` ;
-- variables d'exécution : `SUPABASE_URL=https://api.castor.<domaine>` et `SUPABASE_ANON_KEY` (clé publique).
-  Elles sont écrites dans `/config.js` au démarrage : changer de clé ne demande pas de rebuild.
+- build pack **Dockerfile**, répertoire de base `/`, Dockerfile `/apps/web/Dockerfile` ;
+- **Ports Exposes : `80`** (Nginx), healthcheck `/healthz` ;
+- domaine `https://castor.<domaine>` (ou *Generate Domain* pour une adresse de test) ;
+- variables : `SUPABASE_URL` (`https://<ref>.supabase.co`, ou `https://api.castor.<domaine>` en auto-hébergé) et
+  `SUPABASE_PUBLISHABLE_KEY` (ou `SUPABASE_ANON_KEY`, clé anon d'une instance auto-hébergée). Elles sont écrites
+  dans `/config.js` au démarrage : changer de clé ne demande qu'un redémarrage. Sans elles, la PWA affiche
+  « Configuration absente ».
 
-### 4. Premier lancement (lot 0)
+Redéploiement à chaque push : ajouter dans GitHub le webhook fourni par Coolify (onglet *Webhooks* de
+l'application), ou passer par l'app GitHub de Coolify.
 
-1. Se connecter avec le compte de `ADMIN_EMAIL`, configurer le TOTP (obligatoire pour l'administration).
+### D. Premier lancement (lot 0)
+
+1. Se connecter avec le compte administrateur, configurer le TOTP (obligatoire pour l'administration).
 2. *Admin › Données de cours* : vérifier la reprise de l'historique (≈ 3 000 séances depuis 2015) et le contrôle Euronext.
 3. *Admin › Quadrimestres* : importer les prix officiels 2018–2025 (CSV `code;date_ca;prix;avis`).
 4. *Admin › Backtest* : lancer le backtest (REC-01 : la variante « ouverture, centime au plus proche, jour du CA
    exclu » doit retrouver tous les prix au centime), l'inférence des dates manquantes, puis le rejeu (REC-05).
 5. *Admin › Accès* : inviter les lecteurs (e-mail ou lien à transmettre), choisir la visibilité (restreinte par défaut).
 
-### 5. Sauvegardes (ENF-07)
+### E. Sauvegardes (ENF-07)
 
-`scripts/backup.sh` (cron quotidien sur l'hôte) : dump des schémas `public`, `auth` et `castor_meta` vers
-`BACKUP_DIR` (NAS), 30 jours de rétention. Restauration à tester sur une instance de test (REC-11).
+Supabase Cloud sauvegarde la base chaque jour (selon l'offre). En auto-hébergé, `scripts/backup.sh` (cron quotidien
+sur l'hôte) : dump des schémas `public`, `auth` et `castor_meta` vers `BACKUP_DIR` (NAS), 30 jours de rétention.
+Restauration à tester sur une instance de test (REC-11).
 
-### 6. Intégration continue
+### F. Intégration continue
 
 - `.github/workflows/ci.yml` : tests du moteur, typage, build, migrations + tests de droits + test de bout en bout.
+- `.github/workflows/supabase-cloud.yml` : déploiement sur Supabase Cloud (section A).
 - `.github/workflows/deploy.yml` : migrations et déploiement de la fonction sur un runner auto-hébergé du homelab
-  (activer avec la variable de dépôt `CASTOR_DEPLOY_ENABLED=true`). Coolify reconstruit la PWA à chaque push.
+  (section B ; activer avec la variable de dépôt `CASTOR_DEPLOY_ENABLED=true`).
 
 ## Exploitation
 
@@ -147,20 +191,22 @@ Paris et l'état de la base pour ne travailler qu'une fois. Les passages sans tr
 | Fermeture exceptionnelle d'Euronext | *Dividendes et jours fériés* › jours fériés |
 | Règle Castor modifiée | *Paramètres de calcul* › nouvelle version (l'ancienne reste tracée) |
 | Point d'accès Euronext modifié | *Accès* › modèle d'URL de l'historique Euronext |
-| Secret des tâches compromis | `bash scripts/configure-supabase.sh --rotate-secret` |
+| Secret des tâches compromis | Cloud : workflow « Supabase Cloud », case « Renouveler le secret » ; auto-hébergé : `bash scripts/configure-supabase.sh --rotate-secret` |
 
 ### Diagnostic
 
 - Journal des tâches : *Admin › Journal des tâches* (table `job_runs`), audit des écritures admin (`audit_log`).
 - Appels pg_net : `select * from net._http_response order by created desc limit 20;`
 - Exécutions pg_cron : `select * from cron.job_run_details order by start_time desc limit 20;`
-- Fonction : `docker logs <conteneur supabase-edge-functions>` ; santé : `GET /functions/v1/castor-jobs`.
+- Fonction : *Edge Functions › castor-jobs › Logs* (cloud) ou `docker logs <conteneur supabase-edge-functions>` ;
+  santé : `GET /functions/v1/castor-jobs`.
 
 ## Sécurité
 
 - RLS sur toutes les tables ; lecture selon la visibilité (publique, restreinte, privée) ; écriture réservée aux
   administrateurs, dont la session doit être validée par TOTP (`aal2`), contrôlé en base (`is_admin()`) et dans la fonction.
-- La clé `service_role` reste dans le service des fonctions ; seule la clé `anon` est livrée au navigateur.
+- La clé secrète (ou `service_role`) reste dans le service des fonctions et les secrets GitHub ; seule la clé publique
+  (publishable ou `anon`) est livrée au navigateur.
 - Le secret des tâches planifiées est dans Vault et vérifié en base ; il n'apparaît dans aucun fichier du dépôt.
 - Pages non indexées (`robots.txt`, `X-Robots-Tag`, meta), CSP stricte, aucun traceur tiers.
 

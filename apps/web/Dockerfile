@@ -12,6 +12,9 @@ COPY apps/web apps/web
 RUN pnpm --filter @castor/web build
 
 FROM nginx:stable-alpine
+# Variables d'exécution (Coolify) : SUPABASE_URL et SUPABASE_PUBLISHABLE_KEY (ou SUPABASE_ANON_KEY).
+# Vides par défaut pour que le modèle Nginx reste valide et que la PWA affiche « Configuration absente ».
+ENV SUPABASE_URL="" SUPABASE_PUBLISHABLE_KEY="" SUPABASE_ANON_KEY=""
 # Modèle Nginx (CSP calculée à partir de SUPABASE_URL au démarrage) et écriture de /config.js.
 COPY apps/web/nginx/default.conf.template /etc/nginx/templates/default.conf.template
 COPY apps/web/nginx/40-castor-config.sh /docker-entrypoint.d/40-castor-config.sh

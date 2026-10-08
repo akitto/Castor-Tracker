@@ -1,6 +1,8 @@
 export const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-castor-cron',
+  // En-têtes envoyés par supabase-js (liste de @supabase/supabase-js/cors) + secret des tâches planifiées.
+  'Access-Control-Allow-Headers':
+    'authorization, x-client-info, apikey, content-type, x-retry-count, traceparent, tracestate, baggage, x-castor-cron',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
 };
 

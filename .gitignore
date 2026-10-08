@@ -10,3 +10,6 @@ coverage/
 supabase/functions/_shared/core/
 .admin-password
 supabase/tests/function/node_modules/
+
+# Fichiers de travail de la CLI Supabase
+supabase/.temp/

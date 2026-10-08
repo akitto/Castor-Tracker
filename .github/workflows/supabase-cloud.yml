@@ -1,0 +1,82 @@
+name: Supabase Cloud
+
+# Déploie la fonction castor-jobs et configure la base d'un projet Supabase Cloud :
+# migrations, secrets Vault, tâches pg_cron, rôle du premier administrateur, reprise de l'historique.
+# Inactif tant que la variable de dépôt SUPABASE_PROJECT_REF n'existe pas.
+#
+# Settings › Secrets and variables › Actions
+#   Variables : SUPABASE_PROJECT_REF, SUPABASE_PUBLISHABLE_KEY, SITE_URL
+#   Secrets   : SUPABASE_ACCESS_TOKEN (jeton personnel), SUPABASE_DB_URL (connexion « Session pooler »),
+#               SUPABASE_SECRET_KEY, ADMIN_EMAIL (en secret : les journaux d'un dépôt public sont publics)
+# Le compte ADMIN_EMAIL se crée d'abord dans Supabase (Authentication › Users › Add user).
+
+on:
+  workflow_dispatch:
+    inputs:
+      rotate_secret:
+        description: Renouveler le secret des tâches planifiées
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/**'
+      - 'packages/core/src/**'
+      - 'scripts/configure-supabase.sh'
+      - '.github/workflows/supabase-cloud.yml'
+
+concurrency:
+  group: supabase-cloud
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Fonction castor-jobs et base
+    if: vars.SUPABASE_PROJECT_REF != ''
+    runs-on: ubuntu-24.04
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+      SUPABASE_URL: https://${{ vars.SUPABASE_PROJECT_REF }}.supabase.co
+      SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SITE_URL: ${{ vars.SITE_URL }}
+      ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Contrôle des réglages
+        run: |
+          missing=""
+          for name in SUPABASE_ACCESS_TOKEN SUPABASE_PUBLISHABLE_KEY SUPABASE_SECRET_KEY DATABASE_URL; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::réglages manquants :$missing (voir l'en-tête de .github/workflows/supabase-cloud.yml)"
+            exit 1
+          fi
+          case "$DATABASE_URL" in
+            *YOUR-PASSWORD*|*'['*) echo "::error::SUPABASE_DB_URL contient encore [YOUR-PASSWORD] : y mettre le mot de passe de la base"; exit 1 ;;
+          esac
+          command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client; }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Déploiement de castor-jobs
+        run: |
+          node scripts/sync-core.mjs
+          # La fonction contrôle elle-même ses appels (secret Vault des tâches, JWT admin + TOTP) :
+          # la vérification JWT de la passerelle, qui ne connaît pas les nouvelles clés, est désactivée.
+          supabase functions deploy castor-jobs --project-ref "$PROJECT_REF" --no-verify-jwt --use-api
+
+      - name: Configuration de la base
+        env:
+          ROTATE: ${{ inputs.rotate_secret && '--rotate-secret' || '' }}
+        run: bash scripts/configure-supabase.sh $ROTATE

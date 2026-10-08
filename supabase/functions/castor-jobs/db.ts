@@ -16,10 +16,31 @@ import {
 
 export type Db = SupabaseClient<Database>;
 
+/**
+ * Clé d'accès privilégiée. Supabase Cloud fournit SUPABASE_SECRET_KEYS (objet JSON des clés secrètes
+ * sb_secret_…, la première s'appelle « default ») ; les anciennes clés service_role (JWT), seules présentes
+ * en auto-hébergement, sont retirées du cloud fin 2026 et ne servent qu'en repli.
+ */
+export function privilegedKey(): string | undefined {
+  const raw = Deno.env.get('SUPABASE_SECRET_KEYS');
+  if (raw) {
+    try {
+      const keys = JSON.parse(raw) as Record<string, unknown>;
+      const key = keys.default ?? Object.values(keys)[0];
+      if (typeof key === 'string' && key) return key;
+    } catch {
+      // variable illisible : repli sur la clé service_role
+    }
+  }
+  return Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || undefined;
+}
+
 export function serviceClient(): Db {
   const url = Deno.env.get('SUPABASE_URL');
-  const key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  if (!url || !key) throw new Error('SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY absent de l’environnement des fonctions');
+  const key = privilegedKey();
+  if (!url || !key) {
+    throw new Error('SUPABASE_URL ou clé de service (SUPABASE_SECRET_KEYS, SUPABASE_SERVICE_ROLE_KEY) absente de l’environnement des fonctions');
+  }
   return createClient<Database>(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
 }
 
