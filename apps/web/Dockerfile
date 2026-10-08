@@ -9,7 +9,13 @@ COPY apps/web/package.json apps/web/
 RUN pnpm install --frozen-lockfile --filter "@castor/web..."
 COPY packages/core packages/core
 COPY apps/web apps/web
-RUN pnpm --filter @castor/web build
+# Repli : si Coolify passe aussi les variables au build, elles sont intégrées à la PWA (valeurs publiques).
+# /config.js, écrit au démarrage, reste prioritaire.
+ARG SUPABASE_URL=""
+ARG SUPABASE_PUBLISHABLE_KEY=""
+ARG SUPABASE_ANON_KEY=""
+RUN VITE_SUPABASE_URL="$SUPABASE_URL" VITE_SUPABASE_ANON_KEY="${SUPABASE_PUBLISHABLE_KEY:-$SUPABASE_ANON_KEY}" \
+    pnpm --filter @castor/web build
 
 FROM nginx:stable-alpine
 # Variables d'exécution (Coolify) : SUPABASE_URL et SUPABASE_PUBLISHABLE_KEY (ou SUPABASE_ANON_KEY).

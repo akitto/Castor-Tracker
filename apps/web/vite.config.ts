@@ -38,10 +38,11 @@ export default defineConfig({
         cleanupOutdatedCaches: true,
         runtimeCaching: [
           {
-            // Configuration d'exécution (URL et clé anon) : toujours fraîche si possible.
+            // Configuration d'exécution (URL et clé publique) : toujours celle du serveur ;
+            // la copie en cache ne sert que hors ligne (pas de délai : une copie vide ne doit jamais gagner).
             urlPattern: ({ url }) => url.pathname === '/config.js',
             handler: 'NetworkFirst',
-            options: { cacheName: 'castor-config', networkTimeoutSeconds: 3 },
+            options: { cacheName: 'castor-config' },
           },
           {
             // Lectures de l'API (tables, vues, RPC en GET) : réseau d'abord, cache hors ligne.
