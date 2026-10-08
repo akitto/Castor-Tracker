@@ -22,6 +22,12 @@ export type DashboardRow = Views['v_dashboard']['Row'];
 export type HistoryRow = Views['v_history']['Row'];
 export type EstimateHistoryRow = Views['v_estimate_history']['Row'];
 export type JobStatusRow = Views['v_job_status']['Row'];
+export type NotificationTypeRow = Tables['notification_types']['Row'];
+export type NotificationSettingsRow = Tables['notification_settings']['Row'];
+export type NotificationPrefRow = Tables['notification_prefs']['Row'];
+export type PushSubscriptionRow = Tables['push_subscriptions']['Row'];
+export type MyNotificationRow = Views['v_my_notifications']['Row'];
+export type NotificationLogRow = Views['v_notification_log']['Row'];
 
 /** Lève une erreur lisible si la requête a échoué. */
 export function unwrap<T>(res: { data: T; error: { message: string } | null }): T {
@@ -38,7 +44,7 @@ export interface JobResponse {
   [key: string]: unknown;
 }
 
-/** Appel de l'Edge Function castor-jobs (rôle admin et TOTP vérifiés côté serveur). */
+/** Appel de l'Edge Function castor-jobs (rôle, et TOTP pour l'administration, vérifiés côté serveur). */
 export async function runJob(task: string, body: Record<string, unknown> = {}): Promise<JobResponse> {
   const { data, error } = await supabase.functions.invoke<JobResponse>('castor-jobs', { body: { task, ...body } });
   if (error) {

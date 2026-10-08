@@ -11,6 +11,8 @@ const LINKS: [string, string][] = [
   ['backtest', 'Backtest'],
   ['journal', 'Journal des tâches'],
   ['acces', 'Accès'],
+  ['frequentation', 'Fréquentation'],
+  ['notifications', 'Notifications'],
 ];
 
 /** Back-office : navigation latérale et alertes (deux échecs consécutifs d'une tâche). */

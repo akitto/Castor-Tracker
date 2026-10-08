@@ -48,8 +48,8 @@ pnpm install
 pnpm test:coverage      # moteur : 68 tests, couverture > 90 %
 pnpm typecheck
 pnpm build              # PWA dans apps/web/dist
-pnpm test:db            # migrations rejouées sur un Postgres jetable + 65 tests de droits (REC-10)
-pnpm test:functions     # + test de bout en bout de castor-jobs (Deno requis)
+pnpm test:db            # migrations rejouées sur un Postgres jetable + 105 tests de droits (REC-10)
+pnpm test:functions     # + test de bout en bout de castor-jobs et du chiffrement Web Push (Deno requis)
 pnpm db:types           # régénère packages/core/src/database.ts après une migration
 ```
 
@@ -122,7 +122,7 @@ espace les jours rejoués pour tenir dans ce budget ; le message de la tâche l'
 
 `configure-supabase.sh` est idempotent (A et B) : il ne rejoue que les migrations nouvelles (suivies dans
 `castor_meta.migrations`), crée le secret des tâches planifiées dans Vault (`--rotate-secret` pour le renouveler),
-(re)crée les six tâches pg_cron et lance la reprise de l'historique si la base de cours est vide.
+(re)crée les sept tâches pg_cron et lance la reprise de l'historique si la base de cours est vide.
 
 ### C. PWA (Coolify)
 
@@ -173,7 +173,8 @@ Restauration à tester sur une instance de test (REC-11).
 | toutes les 15 min, 9 h – 17 h 50 | `quote` | Cours en séance (différé 15 min), non journalisé |
 | 18 h (relances 18 h 30, 21 h) | `session` | Séance complète, contrôle Euronext, estimation, prix recalculés |
 | 7 h 30, tous les jours | `catchup` | Rattrapage des 30 derniers jours, estimation |
-| 1er du mois | `maintenance` | Fermetures Euronext de l'année suivante, quadrimestres suivants, purge du journal |
+| 1er du mois | `maintenance` | Fermetures Euronext de l'année suivante, quadrimestres suivants, purge du journal et des notifications (120 jours) |
+| toutes les 15 min | `notify` | Notifications différées (heures calmes) et relances ; battement du moniteur externe. Non journalisé |
 
 pg_cron compte en UTC : chaque tâche est planifiée aux heures d'été et d'hiver ; la fonction vérifie l'heure de
 Paris et l'état de la base pour ne travailler qu'une fois. Les passages sans travail ne sont pas journalisés.
@@ -192,9 +193,59 @@ Paris et l'état de la base pour ne travailler qu'une fois. Les passages sans tr
 | Point d'accès Euronext modifié | *Accès* › modèle d'URL de l'historique Euronext |
 | Secret des tâches compromis | Cloud : workflow « Supabase Cloud », case « Renouveler le secret » ; auto-hébergé : `bash scripts/configure-supabase.sh --rotate-secret` |
 
+### Notifications
+
+Web Push pour tous les comptes, webhook en plus pour les administrateurs. Chaque compte règle les siennes dans
+*Mon compte › Notifications* : un interrupteur général, un interrupteur par notification (avec ses seuils), les heures
+calmes (21 h – 8 h, envoi reporté à 8 h sauf urgences admin) et la liste de ses appareils.
+
+| Notification | Public | Déclencheur |
+| --- | --- | --- |
+| Variation de l'estimation | tous | `session` (18 h) : écart ≥ seuil personnel (0,50 € par défaut) depuis la dernière alerte |
+| Fenêtre de calcul | tous | Toute estimation : passage en « fenêtre », puis prix figé |
+| Date du CA connue | tous | Trigger SQL : date saisie au statut « connue » (quadrimestre en cours ou à venir) |
+| Clôture des versements | tous | `catchup` (7 h 30) : J−3 et dernier jour |
+| Prix officiel annoncé | tous | Trigger SQL : prix saisi (écart avec l'estimation finale, plus-value au cours actuel) |
+| Alerte de cours | tous (désactivée par défaut) | `quote` et `session` : seuils haut et bas personnels, réarmés à 0,5 % |
+| Résumé hebdomadaire | tous (désactivé par défaut) | `catchup` du lundi |
+| Tâche en échec (urgent) | admins | Trigger SQL : deux échecs consécutifs d'une tâche |
+| Séance non collectée (urgent) | admins | `catchup` : pas de `session` réussie pour la dernière séance |
+| Anomalie de données | admins | Écart Yahoo/Euronext, repli sur Euronext, séances manquantes, ouverture à plus de 8 % sans dividende |
+| Saisie à faire | admins | Date du CA inconnue à J−7 du créneau ; prix officiel non saisi 3 jours après le CA et la clôture |
+| Écart au centime | admins | Prix officiel ≠ prix recalculé alors que les 20 séances sont connues |
+| Inférence ambiguë | admins | `infer` : plusieurs dates possibles |
+| Sécurité et accès (urgent) | admins | Rôle accordé, modifié, retiré ; secret des tâches renouvelé |
+
+Fonctionnement : un événement par fait (`notification_events`, clé de déduplication), réparti en envois par compte et
+par canal (`notification_deliveries`) selon les préférences, puis envoyé par `castor-jobs` à la fin de chaque tâche,
+sur appel pg_net quand un trigger SQL crée l'événement, et toutes les 15 min. Trois essais (15 puis 30 min d'écart),
+abonnements expirés supprimés, envois de plus de 36 h abandonnés. Chiffrement Web Push (RFC 8291) et VAPID
+(RFC 8292) écrits avec WebCrypto, sans dépendance.
+
+Mise en service :
+
+1. Supabase Cloud : recoller `deploy/1-base-a-coller-dans-SQL-Editor.sql` (SQL Editor) puis
+   `deploy/2-fonction-a-coller-dans-Edge-Functions.js` (fonction `castor-jobs`). Auto-hébergé :
+   `bash scripts/deploy-functions.sh` puis `bash scripts/configure-supabase.sh`. La migration ajoute d'elle-même la
+   tâche `castor-notify` si les tâches planifiées existent déjà.
+2. Rien à générer : la paire de clés VAPID est créée au premier abonnement (privée dans Vault sous
+   `castor_vapid_private`, publique dans `app_config.vapid_public_key`). `app_config.site_url` sert d'identifiant VAPID
+   et d'adresse des liens des webhooks : posé par `SITE_URL` en auto-hébergé, sinon repris de l'adresse HTTPS de la
+   PWA au premier abonnement.
+3. Chaque appareil s'abonne depuis *Mon compte › Notifications*. Sur iPhone et iPad (iOS 16.4 et plus), la PWA doit
+   d'abord être installée sur l'écran d'accueil et ouverte depuis son icône.
+4. Webhook (admins, session TOTP) : JSON générique (Home Assistant, n8n), ntfy (URL du sujet), Discord, Slack et
+   compatibles ; en-tête `Authorization` facultatif, bouton de test.
+5. *Admin › Notifications* : journal des envois et URL du **moniteur externe** (Uptime Kuma « Push » ou healthchecks.io),
+   appelée à chaque passage planifié. C'est la seule alerte possible si pg_cron ou la fonction s'arrêtent.
+
+Ne jamais régénérer la clé VAPID à la main : tous les abonnements existants deviendraient invalides.
+
 ### Diagnostic
 
 - Journal des tâches : *Admin › Journal des tâches* (table `job_runs`), audit des écritures admin (`audit_log`).
+- Notifications : *Admin › Notifications* (vue `v_notification_log`), envois en attente :
+  `select * from notification_deliveries where status in ('pending', 'sending');`
 - Appels pg_net : `select * from net._http_response order by created desc limit 20;`
 - Exécutions pg_cron : `select * from cron.job_run_details order by start_time desc limit 20;`
 - Fonction : *Edge Functions › castor-jobs › Logs* (cloud) ou `docker logs <conteneur supabase-edge-functions>` ;
@@ -215,7 +266,7 @@ Paris et l'état de la base pour ne travailler qu'une fois. Les passages sans tr
   expose sans modifier la configuration du modèle Coolify.
 - Table supplémentaire `app_config` : visibilité, TOTP obligatoire, adresse du site, seuil d'alerte, URL Euronext.
 - Les tâches lancées depuis le back-office appellent directement la fonction (pas de table de requêtes).
-- Alertes visibles dans le back-office en V1 ; notifications Web Push et webhook en V1.1.
+- Alertes visibles dans le back-office, et notifications Web Push et webhook (section « Notifications »).
 
 ## Limites connues
 

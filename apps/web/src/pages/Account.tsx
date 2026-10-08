@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
+import { Link } from 'react-router-dom';
 import MfaSetup from '../components/Mfa';
 import { useAuth } from '../lib/auth';
 import { supabase } from '../lib/supabase';
@@ -50,6 +51,18 @@ export default function Account() {
           <dt>Niveau de session</dt><dd>{access?.aal === 'aal2' ? 'second facteur validé' : 'mot de passe ou lien'}</dd>
         </dl>
       </section>
+      {access?.role && (
+        <section className="card">
+          <div className="spread">
+            <h2 className="card__title card__title--lg">Notifications</h2>
+            <Link to="/compte/notifications" className="btn btn--small">Gérer</Link>
+          </div>
+          <p className="small muted" style={{ margin: 0 }}>
+            Web Push sur vos appareils{access.role === 'admin' ? ' et webhook' : ''} : estimation, date du CA, prix officiel, alertes de cours…
+            Chaque notification s’active ou se coupe séparément.
+          </p>
+        </section>
+      )}
       <section className="card">
         <h2 className="card__title card__title--lg">Second facteur (TOTP)</h2>
         {factors.length === 0 && !enrolling && (

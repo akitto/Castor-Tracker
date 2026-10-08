@@ -10,6 +10,7 @@ const ChartPage = lazy(() => import('./pages/ChartPage'));
 const History = lazy(() => import('./pages/History'));
 const Method = lazy(() => import('./pages/Method'));
 const Account = lazy(() => import('./pages/Account'));
+const Notifications = lazy(() => import('./pages/Notifications'));
 const AdminLayout = lazy(() => import('./pages/admin/AdminLayout'));
 const AdminQuadrimesters = lazy(() => import('./pages/admin/Quadrimesters'));
 const AdminQuadrimesterEdit = lazy(() => import('./pages/admin/QuadrimesterEdit'));
@@ -19,6 +20,8 @@ const AdminReference = lazy(() => import('./pages/admin/Reference'));
 const AdminBacktest = lazy(() => import('./pages/admin/Backtest'));
 const AdminJournal = lazy(() => import('./pages/admin/Journal'));
 const AdminAccess = lazy(() => import('./pages/admin/Access'));
+const AdminTraffic = lazy(() => import('./pages/admin/Traffic'));
+const AdminNotifications = lazy(() => import('./pages/admin/Notifications'));
 
 export default function App() {
   return (
@@ -33,6 +36,7 @@ export default function App() {
             <Route path="methode" element={<Method />} />
           </Route>
           <Route path="compte" element={<RequireSession><Account /></RequireSession>} />
+          <Route path="compte/notifications" element={<RequireSession><Notifications /></RequireSession>} />
           <Route path="admin" element={<RequireAdmin><AdminLayout /></RequireAdmin>}>
             <Route index element={<Navigate to="quadrimestres" replace />} />
             <Route path="quadrimestres" element={<AdminQuadrimesters />} />
@@ -43,6 +47,8 @@ export default function App() {
             <Route path="backtest" element={<AdminBacktest />} />
             <Route path="journal" element={<AdminJournal />} />
             <Route path="acces" element={<AdminAccess />} />
+            <Route path="frequentation" element={<AdminTraffic />} />
+            <Route path="notifications" element={<AdminNotifications />} />
           </Route>
           <Route path="*" element={<NotFound />} />
         </Route>

@@ -12,6 +12,19 @@ type Line = { kind: 'row'; row: HistoryRow } | { kind: 'gap'; from: string; to: 
 
 const KIND_LABEL: Record<string, string> = { final: 'à l’annonce', replay: 'rejeu', scheduled: 'du jour', manual: 'du jour' };
 
+const OFFICIAL_LINKS = [
+  {
+    href: 'https://www.vinci.com/rapports/investisseurs-operations-financieres-plan-epargne-groupe',
+    label: 'VINCI — Plan d’épargne Groupe',
+    hint: 'tous les avis d’émission Castor (prix de souscription, date du CA)',
+  },
+  {
+    href: 'https://castor.vinci.com/',
+    label: 'castor.vinci.com',
+    hint: 'site Castor de l’actionnariat salarié',
+  },
+] as const;
+
 function csvValue(v: unknown): string {
   if (v === null || v === undefined) return '';
   if (typeof v === 'number') return String(v).replace('.', ',');
@@ -238,6 +251,18 @@ export default function History() {
           </dl>
         </section>
       </div>
+
+      <section className="card">
+        <h2 className="card__title card__title--lg">Sources officielles</h2>
+        <ul className="small" style={{ margin: 0, paddingLeft: '1.2em', display: 'grid', gap: 6 }}>
+          {OFFICIAL_LINKS.map((l) => (
+            <li key={l.href}>
+              <a href={l.href} target="_blank" rel="noreferrer noopener">{l.label}</a>
+              <span className="muted"> — {l.hint}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
       <Disclaimer />
     </main>
   );

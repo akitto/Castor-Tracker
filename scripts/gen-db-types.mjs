@@ -25,6 +25,8 @@ const TS = {
   jsonb: 'Json',
   json: 'Json',
   void: 'undefined',
+  // fonctions « returns table » : lignes typées côté appelant
+  record: 'Json',
 };
 const tsType = (pg) => {
   if (pg.endsWith('[]')) return `${tsType(pg.slice(0, -2))}[]`;

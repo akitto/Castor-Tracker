@@ -109,6 +109,9 @@ if [ -z "$current" ] || [ "$ROTATE" = "1" ]; then
 select public.castor_set_secret('castor_cron_secret', :'s');
 SQL
   echo "  secret des tâches planifiées $([ -n "$current" ] && echo renouvelé || echo créé)"
+  if [ -n "$current" ]; then
+    psql_cmd -c "select public.notification_emit('security', 'Secret des tâches planifiées renouvelé', 'Le secret partagé entre pg_cron et castor-jobs a été remplacé (configure-supabase.sh --rotate-secret).', '/admin/journal')" >/dev/null || true
+  fi
 fi
 psql_cmd -v url="${FUNCTIONS_URL%/}" <<'SQL' >/dev/null
 select public.castor_set_secret('castor_functions_url', :'url');

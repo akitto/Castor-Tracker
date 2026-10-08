@@ -30,7 +30,9 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
-        globIgnores: ['email/**', 'config.js'],
+        globIgnores: ['email/**', 'config.js', 'push-sw.js'],
+        // Réception des notifications Web Push et ouverture de la page visée au clic.
+        importScripts: ['/push-sw.js'],
         navigateFallback: '/index.html',
         navigateFallbackDenylist: [/^\/config\.js$/, /^\/robots\.txt$/, /^\/email\//, /^\/healthz$/],
         cleanupOutdatedCaches: true,

@@ -12,7 +12,10 @@ import {
   type ISODate,
   type Session,
 } from '../../functions/_shared/core/index.ts';
+import { createECDH, randomBytes } from 'node:crypto';
+import ece from 'npm:http_ece@1.2.0';
 import { handle } from '../../functions/castor-jobs/handler.ts';
+import { b64urlEncode } from '../../functions/castor-jobs/webpush.ts';
 import { serviceClient } from '../../functions/castor-jobs/db.ts';
 import { TASKS, type JobContext } from '../../functions/castor-jobs/tasks.ts';
 
@@ -80,9 +83,23 @@ function yahooChart(from: ISODate, to: ISODate) {
   };
 }
 
+// Services push, webhooks et moniteur simulés : chaque appel est noté pour les assertions.
+const outbox: { host: string; path: string; headers: Record<string, string>; body: Uint8Array | string | null }[] = [];
+
 const realFetch = globalThis.fetch;
 globalThis.fetch = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
   const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+  if (url.hostname.endsWith('.example.test')) {
+    const raw = init?.body ?? null;
+    outbox.push({
+      host: url.hostname,
+      path: url.pathname,
+      headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>).map(([k, v]) => [k.toLowerCase(), v])),
+      body: raw instanceof Uint8Array ? raw : typeof raw === 'string' ? raw : null,
+    });
+    if (url.pathname.includes('/gone')) return Promise.resolve(new Response('expired', { status: 410 }));
+    return Promise.resolve(new Response(null, { status: url.hostname.startsWith('push') ? 201 : 200 }));
+  }
   if (url.hostname.endsWith('finance.yahoo.com')) {
     const range = url.searchParams.get('range');
     const from = range
@@ -242,4 +259,125 @@ Deno.test('accès : invitation, rôles, suppression', async () => {
   assert(del.status === 200, 'compte supprimé');
   const after = await db.from('user_roles').select('user_id').eq('user_id', created.id);
   assert(after.data?.length === 0, 'rôle supprimé avec le compte');
+});
+
+// --- Notifications -----------------------------------------------------------------
+const viewerHeaders = { Authorization: `Bearer ${jwt({ sub: VIEWER, role: 'authenticated', aal: 'aal1' })}` };
+const cronHeaders = { 'x-castor-cron': CRON_SECRET };
+
+function device() {
+  const ecdh = createECDH('prime256v1');
+  ecdh.generateKeys();
+  const auth = randomBytes(16);
+  return { ecdh, auth, p256dh: b64urlEncode(new Uint8Array(ecdh.getPublicKey())), authB64: b64urlEncode(new Uint8Array(auth)) };
+}
+
+function decrypt(body: Uint8Array, dev: ReturnType<typeof device>) {
+  return JSON.parse(ece.decrypt(Buffer.from(body), { version: 'aes128gcm', privateKey: dev.ecdh, authSecret: dev.auth }).toString('utf8'));
+}
+
+Deno.test('notifications : clé VAPID, appareils, test push et webhook', async () => {
+  const k1 = await call({ task: 'push-key' }, viewerHeaders);
+  assert(k1.status === 200 && typeof k1.body.publicKey === 'string' && k1.body.publicKey.length === 87, `clé VAPID : ${JSON.stringify(k1.body)}`);
+  const k2 = await call({ task: 'push-key' }, adminHeaders);
+  assert(k2.body.publicKey === k1.body.publicKey, 'clé VAPID stable');
+  const noRole = await call({ task: 'push-key' }, { Authorization: `Bearer ${jwt({ sub: '00000000-0000-0000-0000-0000000000ff', role: 'authenticated' })}` });
+  assert(noRole.status === 401 || noRole.status === 403, 'compte inconnu refusé');
+  assert((await call({ task: 'webhook-test', url: 'https://hooks.example.test/x' }, viewerHeaders)).status === 403, 'webhook : admins seulement');
+
+  const dev = device();
+  await db.from('push_subscriptions').insert([
+    { user_id: VIEWER, endpoint: 'https://push.example.test/viewer', p256dh: dev.p256dh, auth: dev.authB64 },
+    { user_id: VIEWER, endpoint: 'https://push.example.test/gone', p256dh: dev.p256dh, auth: dev.authB64 },
+  ]);
+  outbox.length = 0;
+  const test = await call({ task: 'push-test' }, viewerHeaders);
+  assert(test.status === 200 && test.body.ok === true, `test push : ${JSON.stringify(test.body)}`);
+  const sent = outbox.find((o) => o.path === '/viewer');
+  assert(sent && sent.headers['content-encoding'] === 'aes128gcm' && sent.headers.authorization.startsWith('vapid t='), 'en-têtes Web Push');
+  assert(decrypt(sent.body as Uint8Array, dev).title.includes('test'), 'message de test déchiffrable');
+  const gone = await db.from('push_subscriptions').select('id').eq('endpoint', 'https://push.example.test/gone');
+  assert(gone.data?.length === 0, 'abonnement expiré (410) supprimé');
+
+  outbox.length = 0;
+  const hook = await call({ task: 'webhook-test', url: 'https://ntfy.example.test/castor', format: 'ntfy', secret: 'Bearer tk_test' }, adminHeaders);
+  assert(hook.status === 200 && hook.body.ok, `test webhook : ${JSON.stringify(hook.body)}`);
+  const ntfy = JSON.parse(outbox[0].body as string);
+  assert(outbox[0].path === '/' && ntfy.topic === 'castor' && outbox[0].headers.authorization === 'Bearer tk_test', 'format ntfy');
+});
+
+Deno.test('notifications : événements, préférences, envoi et relances', async () => {
+  const dev = device();
+  await db.from('push_subscriptions').delete().eq('user_id', VIEWER);
+  await db.from('push_subscriptions').insert({ user_id: VIEWER, endpoint: 'https://push.example.test/v2', p256dh: dev.p256dh, auth: dev.authB64 });
+  await db.from('notification_settings').upsert({ user_id: VIEWER, quiet_hours: false });
+  const saved = await db.from('notification_settings').upsert(
+    { user_id: ADMIN, quiet_hours: false, webhook_enabled: true, webhook_url: 'https://hooks.example.test/castor', webhook_format: 'json' },
+  );
+  assert(!saved.error, `réglages admin : ${saved.error?.message}`);
+  await db.from('admin_config').update({ heartbeat_url: 'https://kuma.example.test/api/push/abc' }).eq('id', true);
+  // Les événements antérieurs (rôles du jeu de données, anomalies des tests précédents) sont déjà distribués.
+  await call({ task: 'notify' }, adminHeaders);
+
+  // Date du CA connue (trigger SQL) → push au viewer, webhook à l'admin.
+  outbox.length = 0;
+  const next = await db.from('quadrimesters').select('code, board_slot_start').gt('start_date', today).is('official_price', null)
+    .order('start_date').limit(1).single();
+  await db.from('quadrimesters').update({ board_date: next.data!.board_slot_start, board_status: 'known' }).eq('code', next.data!.code);
+  const run = await call({ task: 'notify' }, cronHeaders);
+  assert(run.status === 200 && run.body.details?.sent >= 2, `envoi planifié : ${JSON.stringify(run.body)}`);
+  assert(outbox.some((o) => o.host === 'kuma.example.test'), 'battement du moniteur externe');
+  const push = outbox.find((o) => o.path === '/v2');
+  assert(push && decrypt(push.body as Uint8Array, dev).title === `Date du CA connue pour ${next.data!.code}`, 'push « date du CA »');
+  const webhook = outbox.find((o) => o.host === 'hooks.example.test');
+  assert(webhook && JSON.parse(webhook.body as string).type === 'board_date', 'webhook admin (JSON)');
+  const idle = await call({ task: 'notify' }, cronHeaders);
+  assert(idle.body.skipped === 'aucune notification à envoyer', 'passage planifié sans travail');
+
+  // Interrupteur par type, puis interrupteur général.
+  await db.from('notification_prefs').upsert({ user_id: VIEWER, type: 'security', enabled: true });
+  await db.from('notification_prefs').upsert({ user_id: VIEWER, type: 'board_date', enabled: false });
+  outbox.length = 0;
+  await db.from('quadrimesters').update({ board_date: next.data!.board_slot_start ? addDays(next.data!.board_slot_start, 1) : null }).eq('code', next.data!.code);
+  await call({ task: 'notify' }, cronHeaders);
+  assert(!outbox.some((o) => o.path === '/v2') && outbox.some((o) => o.host === 'hooks.example.test'), 'type coupé pour le viewer seulement');
+  const sec = await db.from('notification_deliveries').select('id').eq('user_id', VIEWER).eq('channel', 'webhook');
+  assert(sec.data?.length === 0, 'pas de webhook pour un viewer');
+
+  // Variation de l'estimation (seuil personnel) et alerte de cours.
+  await db.from('notification_prefs').upsert([
+    { user_id: VIEWER, type: 'estimate_move', enabled: true, params: { threshold: 0.01 } },
+    { user_id: VIEWER, type: 'price_alert', enabled: true, params: { above: 1 } },
+  ]);
+  const last = await db.from('estimates').select('central').eq('quadrimester_code', next.data!.code).order('computed_at', { ascending: false }).limit(1).single();
+  await db.from('notification_state').upsert({ user_id: VIEWER, type: 'estimate_move', state: { code: next.data!.code, central: Number(last.data!.central) - 5 } });
+  outbox.length = 0;
+  const session = await TASKS.session.run(ctxAt(lastSession, 18 * 60));
+  assert(session.message.startsWith('séance'), session.message);
+  const r = await call({ task: 'notify' }, adminHeaders);
+  assert(r.status === 200, `envoi : ${JSON.stringify(r.body)}`);
+  const titles = outbox.filter((o) => o.path === '/v2').map((o) => decrypt(o.body as Uint8Array, dev).title as string);
+  assert(titles.some((t) => t.startsWith(`Estimation ${next.data!.code}`)), `variation de l’estimation : ${titles.join(' | ')}`);
+  assert(titles.some((t) => t.startsWith('VINCI au-dessus de 1,00 €')), `alerte de cours : ${titles.join(' | ')}`);
+  const state = await db.from('notification_state').select('state').eq('user_id', VIEWER).eq('type', 'price_alert').single();
+  assert((state.data!.state as { above: number }).above === 1, 'alerte de cours mémorisée (pas de répétition)');
+  outbox.length = 0;
+  await TASKS.quote.run(ctxAt(lastSession, 15 * 60));
+  await call({ task: 'notify' }, adminHeaders);
+  assert(!outbox.some((o) => o.path === '/v2'), 'seuil déjà franchi : pas de nouvelle alerte');
+
+  // Deux échecs de suite → alerte urgente ; webhook en panne → relance puis échec.
+  await db.from('notification_settings').update({ webhook_url: 'https://hooks.example.test/gone' }).eq('user_id', ADMIN);
+  await db.from('notification_settings').update({ enabled: false }).eq('user_id', VIEWER);
+  const ids = await db.from('job_runs').insert([{ job: 'catchup', status: 'running' }, { job: 'catchup', status: 'running' }]).select('id');
+  for (const row of ids.data ?? []) await db.from('job_runs').update({ status: 'error', message: 'Yahoo indisponible' }).eq('id', row.id);
+  outbox.length = 0;
+  await call({ task: 'notify' }, adminHeaders);
+  const failure = await db.from('notification_events').select('id, urgent').eq('type', 'job_failure').single();
+  assert(failure.data?.urgent === true, 'échec répété : événement urgent');
+  const delivery = await db.from('notification_deliveries').select('status, attempts, error').eq('event_id', failure.data!.id).eq('channel', 'webhook').single();
+  assert(delivery.data?.status === 'pending' && delivery.data.attempts === 1 && String(delivery.data.error).includes('410'), `relance prévue : ${JSON.stringify(delivery.data)}`);
+  assert(!outbox.some((o) => o.path === '/v2'), 'interrupteur général coupé : rien pour le viewer');
+  const mine = await db.from('notification_deliveries').select('id').eq('event_id', failure.data!.id).eq('user_id', VIEWER);
+  assert(mine.data?.length === 0, 'viewer non destinataire des alertes admin');
 });

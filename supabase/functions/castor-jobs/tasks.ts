@@ -39,11 +39,30 @@ import {
   type Market,
   type QuadRow,
 } from './db.ts';
-import { HttpError } from './http.ts';
+import { errorMessage, HttpError } from './http.ts';
+import {
+  dailyChecks,
+  dispatch,
+  notifyAberrantOpen,
+  notifyAmbiguousInference,
+  notifyEstimateMove,
+  notifyEstimatePhase,
+  notifyFallback,
+  notifyPriceAlerts,
+  notifySpreads,
+  pushKeys,
+  pushMessage,
+  pushToUser,
+  safely,
+  sendWebhook,
+  type EstimateSummary,
+  type EventPayload,
+} from './notify.ts';
 import { fetchEuronext, fetchYahoo } from './providers.ts';
 
 export interface Caller {
-  trigger: 'cron' | 'admin';
+  /** cron : secret système ; admin : JWT administrateur (TOTP) ; user : JWT d'un compte avec rôle. */
+  trigger: 'cron' | 'admin' | 'user';
   userId: string | null;
 }
 
@@ -64,8 +83,12 @@ export interface JobResult {
 export interface TaskDef {
   /** Appelable avec le secret système (pg_cron, script de configuration) ; sinon JWT admin seulement. */
   cron: boolean;
+  /** Comptes autorisés avec un JWT : admin (TOTP exigé, par défaut) ou user (tout compte ayant un rôle). */
+  access?: 'admin' | 'user';
   /** Journalisée dans job_runs (par défaut oui). */
   log?: boolean;
+  /** Envoie les notifications en attente après la tâche (par défaut oui). */
+  dispatch?: boolean;
   /** Pour un appel planifié : raison de ne rien faire, ou null pour travailler. */
   gate?: (ctx: JobContext) => Promise<string | null>;
   run: (ctx: JobContext) => Promise<JobResult>;
@@ -149,7 +172,10 @@ async function storeDividends(db: Db, chart: YahooChart): Promise<number> {
   return (res as unknown[] | null)?.length ?? 0;
 }
 
-async function storeQuote(db: Db, chart: YahooChart): Promise<{ price: number; day: ISODate } | null> {
+async function storeQuote(
+  db: Db,
+  chart: YahooChart,
+): Promise<{ price: number; day: ISODate; prevClose: number | null; time: string } | null> {
   const price = chart.regularMarketPrice;
   if (!price) return null;
   const time = chart.regularMarketTime ?? Date.now();
@@ -170,7 +196,7 @@ async function storeQuote(db: Db, chart: YahooChart): Promise<{ price: number; d
     }),
     'cours en séance',
   );
-  return { price, day };
+  return { price, day, prevClose, time: new Date(time).toISOString() };
 }
 
 /** Contrôle croisé Euronext : enregistre ses cours et liste les écarts au-delà du seuil. */
@@ -363,13 +389,31 @@ async function estimateAndStore(ctx: JobContext, market: Market, kind: 'schedule
     referencePrice: referencePriceFor(market, target, today),
     seed: randomSeed(),
   });
+  const previous = (await must(
+    ctx.db.from('estimates').select('state').eq('quadrimester_code', target.code).in('kind', ['scheduled', 'manual'])
+      .order('computed_at', { ascending: false }).limit(1).maybeSingle(),
+    'estimation précédente',
+  )) as { state: string } | null;
   const row = await must(
     ctx.db.from('estimates').insert(estimateRow(target.code, kind, market, result, board)).select('id').single(),
     'enregistrement de l’estimation',
   );
+  const summary: EstimateSummary = {
+    estimateId: (row as { id: number }).id,
+    code: target.code,
+    state: result.state,
+    central: result.central,
+    p05: result.p05,
+    p95: result.p95,
+    reliability: result.reliability,
+    known: result.knownMostProbable,
+    windowDays: market.params.window_days,
+  };
+  await safely('phase', () => notifyEstimatePhase(ctx.db, previous?.state ?? null, summary));
   return {
     message: `${target.code} : ${fr(result.central)} € [${fr(result.p05)} – ${fr(result.p95)}], IF ${Math.round(result.reliability)}`,
-    estimateId: (row as { id: number }).id,
+    estimateId: summary.estimateId,
+    summary,
     details: {
       code: target.code,
       state: result.state,
@@ -423,6 +467,7 @@ const openTask: TaskDef = {
     if (!today?.open) throw new Error('ouverture du jour pas encore publiée par Yahoo');
     await storeBars(ctx.db, [today], 'yahoo', 'open');
     const market = await loadMarket(ctx.db);
+    await safely('ouverture', () => notifyAberrantOpen(ctx.db, market, ctx.clock.date));
     const est = await estimateAndStore(ctx, market, ctx.caller.trigger === 'cron' ? 'scheduled' : 'manual');
     return {
       message: `ouverture ${fr(today.open)} € ; ${est.message}`,
@@ -450,6 +495,7 @@ const quoteTask: TaskDef = {
         estimateMessage = (await estimateAndStore(ctx, market, 'scheduled')).message;
       }
     }
+    if (quote) await safely('alertes de cours', () => notifyPriceAlerts(ctx.db, quote));
     return {
       message: quote ? `cours ${fr(quote.price)} €` : 'cours indisponible',
       details: { quote, estimate: estimateMessage },
@@ -471,16 +517,18 @@ const sessionTask: TaskDef = {
     const warnings: string[] = [];
     let stored = 0;
     let dividends = 0;
+    let quote: Awaited<ReturnType<typeof storeQuote>> = null;
     try {
       const chart = await fetchYahoo(config.yahoo_symbol, { range: '1mo' });
       stored = await storeBars(ctx.db, completedBars(chart.bars, ctx.clock), 'yahoo', 'full');
       dividends = await storeDividends(ctx.db, chart);
-      await storeQuote(ctx.db, chart);
+      quote = await storeQuote(ctx.db, chart);
     } catch (e) {
       warnings.push((e as Error).message);
       const rows = await fetchEuronext(config.euronext_code, addDays(ctx.clock.date, -30), ctx.clock.date, config.euronext_history_url);
       stored = await storeBars(ctx.db, completedBars(rows, ctx.clock), 'euronext', 'full');
       warnings.push(`repli sur Euronext : ${stored} séance(s)`);
+      await safely('repli', () => notifyFallback(ctx.db, ctx.clock.date, errorMessage(e)));
     }
     const control = await controlWithEuronext(ctx.db, config, addDays(ctx.clock.date, -14), ctx.clock.date);
     if (control.error) warnings.push(`contrôle Euronext impossible : ${control.error}`);
@@ -489,6 +537,12 @@ const sessionTask: TaskDef = {
     if (!todayRow?.close) throw new Error('clôture du jour absente des sources');
     const est = await estimateAndStore(ctx, market, ctx.caller.trigger === 'cron' ? 'scheduled' : 'manual');
     await refreshComputedPrices(ctx.db, market);
+    await safely('séance', async () => {
+      await notifySpreads(ctx.db, control.spreads);
+      await notifyAberrantOpen(ctx.db, market, ctx.clock.date);
+      if (est.summary) await notifyEstimateMove(ctx.db, est.summary as EstimateSummary);
+      if (quote) await notifyPriceAlerts(ctx.db, quote);
+    });
     const alert = control.spreads.length > 0 ? ` ; ÉCART de sources sur ${control.spreads.length} cours` : '';
     return {
       message: `séance du ${ctx.clock.date} : clôture ${fr(Number(todayRow.close))} €${alert} ; ${est.message}`,
@@ -534,6 +588,10 @@ const catchupTask: TaskDef = {
     const missing = missingSessions(market, addDays(ctx.clock.date, -days), lastClosed);
     await refreshComputedPrices(ctx.db, market);
     const est = await estimateAndStore(ctx, market, ctx.caller.trigger === 'cron' ? 'scheduled' : 'manual');
+    await safely('rattrapage', async () => {
+      await notifySpreads(ctx.db, control.spreads);
+      await dailyChecks(ctx.db, market, ctx.clock.date, missing);
+    });
     return {
       message: `${stored} séance(s) écrite(s), ${missing.length} manquante(s) sur ${days} jours ; ${est.message}`,
       details: { stored, dividends, missing, control, warnings },
@@ -695,6 +753,7 @@ const inferTask: TaskDef = {
       'enregistrement de l’inférence',
     );
     if (applied > 0) await refreshComputedPrices(ctx.db, await loadMarket(ctx.db));
+    await safely('inférence', () => notifyAmbiguousInference(ctx.db, results));
     return {
       message: results.length === 0
         ? 'aucun prix officiel sans date de CA connue'
@@ -859,11 +918,26 @@ const maintenanceTask: TaskDef = {
       ctx.db.from('job_runs').delete().lt('started_at', purgeBefore).neq('status', 'error').select('id'),
       'purge du journal',
     );
+    const viewsBefore = new Date(ctx.now.getTime() - 400 * 86_400_000).toISOString();
+    const purgedViews = await must(
+      ctx.db.from('page_views').delete().lt('at', viewsBefore).select('id'),
+      'purge de la fréquentation',
+    );
+    const purgedNotifications = await must(
+      ctx.db.from('notification_events').delete()
+        .lt('created_at', new Date(ctx.now.getTime() - 120 * 86_400_000).toISOString()).select('id'),
+      'purge des notifications',
+    );
     const market = await loadMarket(ctx.db);
     const recalculated = await refreshComputedPrices(ctx.db, market);
     return {
       message: `${created.length} quadrimestre(s) créé(s), ${(insertedHolidays as unknown[]).length} fermeture(s) ajoutée(s), ${(purged as unknown[]).length} entrée(s) de journal purgée(s)`,
-      details: { created, recalculated },
+      details: {
+        created,
+        recalculated,
+        purgedPageViews: (purgedViews as unknown[]).length,
+        purgedNotifications: (purgedNotifications as unknown[]).length,
+      },
     };
   },
 };
@@ -880,6 +954,7 @@ function requireRole(value: unknown): 'admin' | 'viewer' {
 const usersTask: TaskDef = {
   cron: false,
   log: false,
+  dispatch: false,
   async run(ctx) {
     const { data, error } = await ctx.db.auth.admin.listUsers({ page: 1, perPage: 500 });
     if (error) throw new Error(error.message);
@@ -970,6 +1045,100 @@ const deleteUserTask: TaskDef = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+const notifyTask: TaskDef = {
+  cron: true,
+  log: false,
+  dispatch: false,
+  async gate(ctx) {
+    const due = await must(ctx.db.rpc('notification_due'), 'notifications en attente');
+    return Number(due) > 0 ? null : 'aucune notification à envoyer';
+  },
+  async run(ctx) {
+    const r = await dispatch(ctx.db);
+    return {
+      message: `${r.sent} envoyée(s), ${r.retried} à relancer, ${r.failed} en échec, ${r.skipped} sans destination`,
+      details: { ...r },
+    };
+  },
+};
+
+const pushKeyTask: TaskDef = {
+  cron: false,
+  access: 'user',
+  log: false,
+  dispatch: false,
+  async run(ctx) {
+    const keys = await pushKeys(ctx.db);
+    // Adresse de la PWA encore inconnue (installation Supabase Cloud sans script) : celle de la page qui s'abonne.
+    // Elle sert d'identifiant VAPID et de base aux liens des webhooks.
+    const origin = typeof ctx.body.origin === 'string' ? ctx.body.origin.replace(/\/+$/, '') : '';
+    if (/^https:\/\/[^/\s]+$/.test(origin)) {
+      await ctx.db.from('app_config').update({ site_url: origin }).eq('id', true).is('site_url', null);
+    }
+    return { message: 'clé publique VAPID', publicKey: keys.publicKey };
+  },
+};
+
+function testEvent(title: string, body: string): EventPayload {
+  return { id: 0, type: 'test', title, body, url: '/compte/notifications', urgent: false, data: {}, created_at: new Date().toISOString() };
+}
+
+const pushTestTask: TaskDef = {
+  cron: false,
+  access: 'user',
+  log: false,
+  dispatch: false,
+  async run(ctx) {
+    let q = ctx.db.from('push_subscriptions').select('id, user_id, endpoint, p256dh, auth').eq('user_id', ctx.caller.userId as string);
+    if (typeof ctx.body.endpoint === 'string') q = q.eq('endpoint', ctx.body.endpoint);
+    const subs = (await must(q, 'abonnements')) as { id: number; user_id: string; endpoint: string; p256dh: string; auth: string }[];
+    if (subs.length === 0) throw new HttpError(400, 'aucun appareil abonné : activer d’abord les notifications sur cet appareil');
+    const [keys, config] = await Promise.all([pushKeys(ctx.db), loadConfig(ctx.db)]);
+    const ev = testEvent('Castor Tracker : notification de test', 'Les notifications arrivent bien sur cet appareil.');
+    const r = await pushToUser(ctx.db, subs, pushMessage({ ...ev, id: Date.now() }), keys, config, false);
+    const okCount = r.results.filter((x) => x.ok).length;
+    return {
+      message: okCount > 0
+        ? `notification envoyée à ${okCount} appareil(s) sur ${r.results.length}`
+        : `échec de l’envoi : ${r.results.map((x) => x.error).join(' ; ')}`,
+      ok: okCount > 0,
+      results: r.results,
+    };
+  },
+};
+
+const webhookTestTask: TaskDef = {
+  cron: false,
+  log: false,
+  dispatch: false,
+  async run(ctx) {
+    let target = ctx.body.url
+      ? {
+        webhook_url: String(ctx.body.url),
+        webhook_format: String(ctx.body.format ?? 'json'),
+        webhook_secret: typeof ctx.body.secret === 'string' && ctx.body.secret ? ctx.body.secret : null,
+      }
+      : null;
+    if (!target) {
+      const saved = await must(
+        ctx.db.from('notification_settings').select('webhook_url, webhook_format, webhook_secret').eq('user_id', ctx.caller.userId as string).maybeSingle(),
+        'webhook',
+      ) as { webhook_url: string | null; webhook_format: string; webhook_secret: string | null } | null;
+      if (!saved?.webhook_url) throw new HttpError(400, 'aucun webhook enregistré');
+      target = { webhook_url: saved.webhook_url, webhook_format: saved.webhook_format, webhook_secret: saved.webhook_secret };
+    }
+    if (!/^https?:\/\//.test(target.webhook_url)) throw new HttpError(400, 'URL de webhook invalide');
+    if (!['json', 'ntfy', 'discord', 'slack'].includes(target.webhook_format)) throw new HttpError(400, 'format de webhook inconnu');
+    const config = await loadConfig(ctx.db);
+    const r = await sendWebhook(target, testEvent('Castor Tracker : test du webhook', 'Le webhook des administrateurs fonctionne.'), config);
+    return { message: r.ok ? `webhook joint (HTTP ${r.status})` : `échec du webhook : ${r.error}`, ok: r.ok, status: r.status };
+  },
+};
+
 export const TASKS: Record<string, TaskDef> = {
   open: openTask,
   quote: quoteTask,
@@ -985,4 +1154,8 @@ export const TASKS: Record<string, TaskDef> = {
   invite: inviteTask,
   'set-role': setRoleTask,
   'delete-user': deleteUserTask,
+  notify: notifyTask,
+  'push-key': pushKeyTask,
+  'push-test': pushTestTask,
+  'webhook-test': webhookTestTask,
 };

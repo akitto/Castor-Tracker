@@ -2,6 +2,7 @@ import type { Session } from '@supabase/supabase-js';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { API_CACHE, CONFIGURED } from './config';
+import { forgetDevice } from './push';
 import { supabase, unwrap } from './supabase';
 
 export interface Access {
@@ -69,6 +70,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       needsMfa: Boolean(access && access.role === 'admin' && access.mfa_required && access.aal !== 'aal2'),
       refreshAccess: () => accessQuery.refetch(),
       signOut: async () => {
+        await forgetDevice();
         await supabase.auth.signOut();
         qc.clear();
         if ('caches' in window) await caches.delete(API_CACHE);

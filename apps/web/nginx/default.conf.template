@@ -31,7 +31,7 @@ server {
   }
 
   # Service worker et configuration : toujours revalidés.
-  location ~* ^/(sw\.js|workbox-[^/]+\.js|config\.js|registerSW\.js)$ {
+  location ~* ^/(sw\.js|push-sw\.js|workbox-[^/]+\.js|config\.js|registerSW\.js)$ {
     expires -1;
     try_files $uri =404;
   }

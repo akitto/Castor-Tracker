@@ -235,5 +235,135 @@ select tests.ok(public.castor_secret('castor_functions_url') = 'https://abc.supa
 select tests.ok(length(public.castor_secret('castor_cron_secret')) = 64, 'secret aléatoire de 64 caractères');
 rollback;
 
+-- Fréquentation (page_views)
+begin;
+select set_config('role', 'anon', true);
+select public.track_page_view('/', 'a1b2c3d4-0000-4000-8000-000000000001');
+select public.track_page_view('/', 'a1b2c3d4-0000-4000-8000-000000000001');
+select public.track_page_view('/historique', 'a1b2c3d4-0000-4000-8000-000000000001');
+select public.track_page_view('/methode', 'pas un identifiant !');
+select public.track_page_view('/admin/acces', 'a1b2c3d4-0000-4000-8000-000000000002');
+select tests.fails($$select * from public.page_views$$, 'anon ne lit pas la fréquentation');
+select tests.fails($$insert into public.page_views (path) values ('/')$$, 'anon n''écrit pas directement la fréquentation');
+select tests.fails($$select public.admin_page_views_hourly(24)$$, 'anon n''a pas les statistiques');
+select set_config('role', 'authenticated', true);
+select set_config('request.jwt.claims',
+  '{"sub":"00000000-0000-0000-0000-00000000000b","role":"authenticated","aal":"aal1"}', true);
+select tests.fails($$select public.admin_page_views_hourly(24)$$, 'viewer n''a pas les statistiques');
+select set_config('request.jwt.claims',
+  '{"sub":"00000000-0000-0000-0000-00000000000a","role":"authenticated","aal":"aal2"}', true);
+select tests.ok((select (s ->> 'views')::int = 3 and (s ->> 'visitors')::int = 2
+  and jsonb_array_length(s -> 'hours') = 24
+  and (select sum((h ->> 1)::int) from jsonb_array_elements(s -> 'hours') h) = 3
+  from public.admin_page_views_hourly(24) s),
+  'statistiques horaires : anti-rebond, pages admin ignorées, visiteur invalide anonymisé');
+select tests.ok(jsonb_array_length(public.admin_page_views_hourly(100000) -> 'hours') = 24 * 92, 'période plafonnée à 92 jours');
+rollback;
+
+-- Notifications : préférences, abonnements, événements, distribution
+select tests.ok(tests.count('select 1 from public.notification_types') = 14, 'catalogue des notifications');
+select tests.ok(tests.count($$select 1 from public.notification_events where type = 'security'$$) = 2,
+  'rôles du jeu de données notifiés aux admins');
+
+begin;
+select set_config('role', 'anon', true);
+select tests.fails($$select * from public.notification_prefs$$, 'anon ne lit pas les préférences');
+select tests.fails($$select public.push_subscribe('https://push.example.org/x', repeat('a', 87), repeat('b', 22))$$,
+  'anon ne s''abonne pas');
+rollback;
+
+begin;
+select set_config('role', 'authenticated', true);
+select set_config('request.jwt.claims',
+  '{"sub":"00000000-0000-0000-0000-00000000000b","role":"authenticated","aal":"aal1"}', true);
+select tests.ok(tests.count('select 1 from public.notification_types') = 14, 'viewer lit le catalogue');
+insert into public.notification_settings (user_id, enabled) values ('00000000-0000-0000-0000-00000000000b', true);
+insert into public.notification_prefs (user_id, type, enabled, params)
+  values ('00000000-0000-0000-0000-00000000000b', 'price_alert', true, '{"above": 130}');
+select tests.ok(tests.count('select 1 from public.notification_prefs') = 1, 'viewer enregistre ses préférences');
+select tests.fails($$insert into public.notification_prefs (user_id, type, enabled)
+  values ('00000000-0000-0000-0000-00000000000a', 'estimate_move', false)$$, 'viewer ne règle pas les préférences d''un autre');
+select tests.fails($$update public.notification_settings set webhook_url = 'https://hooks.example.org/x', webhook_enabled = true$$,
+  'webhook réservé aux admins');
+select tests.fails($$select * from public.notification_state$$, 'mémoire des alertes réservée aux fonctions');
+select tests.ok(tests.count('select 1 from public.admin_config') = 0, 'viewer ne lit pas les réglages admin');
+select tests.ok(public.push_subscribe('https://push.example.org/viewer', repeat('a', 87), repeat('b', 22), 'test') > 0,
+  'viewer s''abonne au Web Push');
+select tests.fails($$select public.push_subscribe('http://push.example.org/x', repeat('a', 87), repeat('b', 22))$$,
+  'abonnement en clair refusé');
+select tests.ok(tests.count('select 1 from public.push_subscriptions') = 1, 'viewer voit son abonnement');
+select tests.ok(tests.count('select 1 from public.notification_events') = 0, 'viewer ne lit pas les événements des autres');
+select tests.fails($$select public.notification_emit('security', 'x', 'y')$$, 'viewer ne crée pas d''événement');
+select tests.fails($$select public.notification_claim(10)$$, 'viewer ne réserve pas d''envoi');
+rollback;
+
+begin;
+select set_config('role', 'authenticated', true);
+select set_config('request.jwt.claims',
+  '{"sub":"00000000-0000-0000-0000-00000000000a","role":"authenticated","aal":"aal2"}', true);
+insert into public.notification_settings (user_id, webhook_enabled, webhook_url, webhook_format)
+  values ('00000000-0000-0000-0000-00000000000a', true, 'https://hooks.example.org/castor', 'ntfy');
+select tests.ok(tests.count('select 1 from public.notification_settings where webhook_enabled') = 1, 'admin configure son webhook');
+update public.admin_config set heartbeat_url = 'https://kuma.example.org/api/push/abc';
+select tests.ok(tests.count('select 1 from public.admin_config where heartbeat_url is not null') = 1, 'admin règle le moniteur externe');
+select tests.ok(tests.count('select 1 from public.v_notification_log') >= 2, 'admin lit le journal des notifications');
+rollback;
+
+begin;
+-- abonnements et préférences (comme les ferait la PWA)
+insert into public.push_subscriptions (user_id, endpoint, p256dh, auth) values
+  ('00000000-0000-0000-0000-00000000000a', 'https://push.example.org/a', repeat('a', 87), repeat('b', 22)),
+  ('00000000-0000-0000-0000-00000000000b', 'https://push.example.org/b', repeat('a', 87), repeat('b', 22));
+insert into public.notification_settings (user_id, quiet_hours, webhook_enabled, webhook_url)
+  values ('00000000-0000-0000-0000-00000000000a', false, true, 'https://hooks.example.org/castor');
+update public.notification_events set fanned_out_at = now();
+-- date du CA connue (quadrimestre à venir) et prix officiel
+update public.quadrimesters set board_date = '2026-10-15', board_status = 'known' where code = '2027/1';
+select tests.ok(tests.count($$select 1 from public.notification_events where dedup_key = 'board:2027/1:2026-10-15'$$) = 1,
+  'date du CA connue notifiée');
+update public.quadrimesters set board_date = '2025-10-16' where code = '2026/1';
+select tests.ok(tests.count($$select 1 from public.notification_events where dedup_key like 'board:2026/1%'$$) = 0,
+  'quadrimestre passé : pas de notification');
+update public.quadrimesters set official_price = 106.50, computed_price = 106.40, computed_missing = 0 where code = '2027/1';
+select tests.ok((select body like 'Prix de souscription 2027/1 : 106,50 €.%(121,95 €) : +14,5 \%%.' from public.notification_events
+  where dedup_key = 'official:2027/1'), 'prix officiel notifié avec la plus-value');
+select tests.ok(tests.count($$select 1 from public.notification_events where dedup_key = 'mismatch:2027/1'$$) = 1,
+  'écart au centime signalé aux admins');
+select tests.ok(public.notification_emit('board_date', 'doublon', 'x', null, 'board:2027/1:2026-10-15') is null,
+  'déduplication');
+-- préférences : le viewer coupe le prix officiel, l'admin coupe tout
+insert into public.notification_prefs (user_id, type, enabled) values ('00000000-0000-0000-0000-00000000000b', 'official_price', false);
+insert into public.notification_settings (user_id, quiet_hours) values ('00000000-0000-0000-0000-00000000000b', false);
+select tests.ok(public.notification_fanout() = 7, 'distribution : push et webhook selon les préférences');
+select tests.ok(tests.count($$select 1 from public.notification_deliveries d join public.notification_events e on e.id = d.event_id
+  where e.type = 'official_price' and d.user_id = '00000000-0000-0000-0000-00000000000b'$$) = 0, 'type désactivé : rien');
+select tests.ok(tests.count($$select 1 from public.notification_deliveries d join public.notification_events e on e.id = d.event_id
+  where e.type = 'price_mismatch' and d.user_id = '00000000-0000-0000-0000-00000000000b'$$) = 0, 'type admin : pas pour le viewer');
+select tests.ok(tests.count($$select 1 from public.notification_deliveries where channel = 'webhook'$$) = 3, 'webhook de l''admin');
+update public.notification_settings set enabled = false where user_id = '00000000-0000-0000-0000-00000000000a';
+select public.notification_emit('board_date', 'test', 'x', null, 'board:test');
+select tests.ok(public.notification_fanout() = 1, 'interrupteur général coupé : l''admin ne reçoit plus rien');
+select tests.ok(public.notification_due() = 8, 'envois en attente');
+select tests.ok(jsonb_array_length(public.notification_claim(100)) = 8, 'envois dus réservés');
+select tests.ok(tests.count($$select 1 from public.notification_deliveries where status = 'sending' and attempts = 1$$) = 8,
+  'envois marqués en cours');
+select tests.ok(jsonb_array_length(public.notification_claim(100)) = 0, 'pas de double réservation');
+-- heures calmes
+select tests.ok(public.notification_not_before(true, false, '2026-10-08 22:30+02') = '2026-10-09 08:00+02', 'heures calmes : soir');
+select tests.ok(public.notification_not_before(true, false, '2026-12-08 06:10+01') = '2026-12-08 08:00+01', 'heures calmes : matin');
+select tests.ok(public.notification_not_before(true, true, '2026-10-08 22:30+02') = '2026-10-08 22:30+02', 'urgence : immédiat');
+select tests.ok(public.notification_not_before(false, false, '2026-10-08 22:30+02') = '2026-10-08 22:30+02', 'heures calmes désactivées');
+-- deux échecs de suite
+insert into public.job_runs (job, status) values ('session', 'running'), ('session', 'running');
+update public.job_runs set status = 'error', message = 'Yahoo indisponible', finished_at = now() where job = 'session';
+select tests.ok(tests.count($$select 1 from public.notification_events where type = 'job_failure' and urgent$$) = 1,
+  'deux échecs de suite : alerte urgente');
+-- clés VAPID : la première écriture gagne
+select public.castor_push_keys_init('pub1', 'priv1');
+select tests.ok((public.castor_push_keys_init('pub2', 'priv2') ->> 'public') = 'pub1', 'clés VAPID conservées');
+select tests.ok((select vapid_public_key from public.app_config) = 'pub1', 'clé publique VAPID lisible par la PWA');
+rollback;
+
 \o
 \echo 'Tous les tests SQL sont passés.'
+

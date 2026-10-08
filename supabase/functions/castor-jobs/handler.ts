@@ -2,7 +2,8 @@
 import { CORE_VERSION, parisClock } from '../_shared/core/index.ts';
 import { must, serviceClient, toJson, type Db } from './db.ts';
 import { corsHeaders, errorMessage, HttpError, json } from './http.ts';
-import { TASKS, type Caller, type JobContext, type JobResult } from './tasks.ts';
+import { dispatch, heartbeat } from './notify.ts';
+import { TASKS, type Caller, type JobContext, type JobResult, type TaskDef } from './tasks.ts';
 
 function decodeJwtPayload(token: string): Record<string, unknown> {
   const part = token.split('.')[1];
@@ -15,7 +16,7 @@ function decodeJwtPayload(token: string): Record<string, unknown> {
   }
 }
 
-async function authenticate(req: Request, db: Db): Promise<Caller> {
+async function authenticate(req: Request, db: Db, access: NonNullable<TaskDef['access']>): Promise<Caller> {
   const cronSecret = req.headers.get('x-castor-cron');
   if (cronSecret) {
     const ok = await must(db.rpc('castor_verify_cron_secret', { p_secret: cronSecret }), 'secret planifié');
@@ -30,12 +31,26 @@ async function authenticate(req: Request, db: Db): Promise<Caller> {
     must(db.from('user_roles').select('role').eq('user_id', data.user.id).maybeSingle(), 'rôle'),
     must(db.from('app_config').select('admin_mfa_required').maybeSingle(), 'réglages'),
   ]);
-  if ((role as { role: string } | null)?.role !== 'admin') throw new HttpError(403, 'réservé aux administrateurs');
+  const userRole = (role as { role: string } | null)?.role ?? null;
+  if (access === 'user') {
+    if (!userRole) throw new HttpError(403, 'compte sans accès à Castor Tracker');
+    return { trigger: 'user', userId: data.user.id };
+  }
+  if (userRole !== 'admin') throw new HttpError(403, 'réservé aux administrateurs');
   const mfaRequired = (config as { admin_mfa_required: boolean } | null)?.admin_mfa_required ?? true;
   if (mfaRequired && decodeJwtPayload(token).aal !== 'aal2') {
     throw new HttpError(403, 'second facteur (TOTP) requis pour l’administration');
   }
   return { trigger: 'admin', userId: data.user.id };
+}
+
+/** Envoie les notifications nées pendant la tâche, sans jamais faire échouer la réponse. */
+async function dispatchQuietly(db: Db): Promise<void> {
+  try {
+    await dispatch(db);
+  } catch (e) {
+    console.error('envoi des notifications :', errorMessage(e));
+  }
 }
 
 async function withJobLog(ctx: JobContext, job: string, run: () => Promise<JobResult>): Promise<JobResult> {
@@ -94,17 +109,23 @@ export async function handle(req: Request): Promise<Response> {
     const def = TASKS[task];
     if (!def) throw new HttpError(400, `tâche inconnue : ${task || '(vide)'}`);
     const db = serviceClient();
-    const caller = await authenticate(req, db);
+    const caller = await authenticate(req, db, def.access ?? 'admin');
     if (caller.trigger === 'cron' && !def.cron) throw new HttpError(403, `tâche ${task} non planifiable`);
     if (caller.trigger === 'admin') await registerEndpoint(db);
     const now = new Date();
     const ctx: JobContext = { db, caller, body, clock: parisClock(now), now };
+    // Passage planifié des notifications (toutes les 15 min) : battement du moniteur externe.
+    if (caller.trigger === 'cron' && task === 'notify') await heartbeat(db);
     if (caller.trigger === 'cron' && def.gate) {
       const reason = await def.gate(ctx);
       if (reason) return json({ task, skipped: reason });
     }
-    const result = def.log === false ? await def.run(ctx) : await withJobLog(ctx, task, () => def.run(ctx));
-    return json({ task, ...result });
+    try {
+      const result = def.log === false ? await def.run(ctx) : await withJobLog(ctx, task, () => def.run(ctx));
+      return json({ task, ...result });
+    } finally {
+      if (def.dispatch !== false) await dispatchQuietly(db);
+    }
   } catch (e) {
     const status = e instanceof HttpError ? e.status : 500;
     if (status >= 500) console.error(`castor-jobs ${task} :`, e);

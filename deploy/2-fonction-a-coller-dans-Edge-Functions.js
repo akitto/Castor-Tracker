@@ -22,6 +22,9 @@ function fromDayNumber(day) {
 function addDays(date, days) {
   return fromDayNumber(toDayNumber(date) + days);
 }
+function diffDays(a, b) {
+  return toDayNumber(a) - toDayNumber(b);
+}
 function weekday(date) {
   return new Date(toDayNumber(date) * DAY_MS).getUTCDay();
 }
@@ -1413,6 +1416,779 @@ function errorMessage(e) {
   return String(e);
 }
 
+// supabase/functions/castor-jobs/webpush.ts
+var enc = new TextEncoder();
+var bs = (b) => b;
+function b64urlEncode(bytes) {
+  const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let s = "";
+  for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function b64urlDecode(text) {
+  const b64 = text.replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
+  const bin = atob(b64.padEnd(Math.ceil(b64.length / 4) * 4, "="));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function concat(...parts) {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) {
+    out.set(p, o);
+    o += p.length;
+  }
+  return out;
+}
+async function hkdf(salt, ikm, info, length) {
+  const key = await crypto.subtle.importKey("raw", bs(ikm), "HKDF", false, [
+    "deriveBits"
+  ]);
+  const bits = await crypto.subtle.deriveBits({
+    name: "HKDF",
+    hash: "SHA-256",
+    salt: bs(salt),
+    info: bs(info)
+  }, key, length * 8);
+  return new Uint8Array(bits);
+}
+async function generateVapidKeys() {
+  const pair = await crypto.subtle.generateKey({
+    name: "ECDSA",
+    namedCurve: "P-256"
+  }, true, [
+    "sign",
+    "verify"
+  ]);
+  const raw = await crypto.subtle.exportKey("raw", pair.publicKey);
+  const jwk = await crypto.subtle.exportKey("jwk", pair.privateKey);
+  return {
+    publicKey: b64urlEncode(raw),
+    privateJwk: {
+      kty: jwk.kty,
+      crv: jwk.crv,
+      x: jwk.x,
+      y: jwk.y,
+      d: jwk.d
+    }
+  };
+}
+async function vapidToken(endpoint, keys, subject, now = Date.now()) {
+  const header = b64urlEncode(enc.encode(JSON.stringify({
+    typ: "JWT",
+    alg: "ES256"
+  })));
+  const payload = b64urlEncode(enc.encode(JSON.stringify({
+    aud: new URL(endpoint).origin,
+    exp: Math.floor(now / 1e3) + 12 * 3600,
+    sub: subject
+  })));
+  const key = await crypto.subtle.importKey("jwk", {
+    ...keys.privateJwk,
+    ext: true
+  }, {
+    name: "ECDSA",
+    namedCurve: "P-256"
+  }, false, [
+    "sign"
+  ]);
+  const sig = await crypto.subtle.sign({
+    name: "ECDSA",
+    hash: "SHA-256"
+  }, key, bs(enc.encode(`${header}.${payload}`)));
+  return `${header}.${payload}.${b64urlEncode(sig)}`;
+}
+async function encryptPayload(sub, plaintext, salt = crypto.getRandomValues(new Uint8Array(16))) {
+  const uaPublic = b64urlDecode(sub.p256dh);
+  const authSecret = b64urlDecode(sub.auth);
+  if (uaPublic.length !== 65 || uaPublic[0] !== 4) throw new Error("cl\xE9 p256dh invalide");
+  if (authSecret.length < 16) throw new Error("secret auth invalide");
+  const rs = 4096;
+  if (plaintext.length + 1 + 16 > rs) throw new Error("message trop long pour Web Push");
+  const local = await crypto.subtle.generateKey({
+    name: "ECDH",
+    namedCurve: "P-256"
+  }, true, [
+    "deriveBits"
+  ]);
+  const asPublic = new Uint8Array(await crypto.subtle.exportKey("raw", local.publicKey));
+  const uaKey = await crypto.subtle.importKey("raw", bs(uaPublic), {
+    name: "ECDH",
+    namedCurve: "P-256"
+  }, false, []);
+  const shared = new Uint8Array(await crypto.subtle.deriveBits({
+    name: "ECDH",
+    public: uaKey
+  }, local.privateKey, 256));
+  const keyInfo = concat(enc.encode("WebPush: info\0"), uaPublic, asPublic);
+  const ikm = await hkdf(authSecret, shared, keyInfo, 32);
+  const cek = await hkdf(salt, ikm, enc.encode("Content-Encoding: aes128gcm\0"), 16);
+  const nonce = await hkdf(salt, ikm, enc.encode("Content-Encoding: nonce\0"), 12);
+  const aes = await crypto.subtle.importKey("raw", bs(cek), "AES-GCM", false, [
+    "encrypt"
+  ]);
+  const cipher = new Uint8Array(await crypto.subtle.encrypt({
+    name: "AES-GCM",
+    iv: bs(nonce)
+  }, aes, bs(concat(plaintext, new Uint8Array([
+    2
+  ])))));
+  const header = new Uint8Array(16 + 4 + 1 + asPublic.length);
+  header.set(salt, 0);
+  new DataView(header.buffer).setUint32(16, rs);
+  header[20] = asPublic.length;
+  header.set(asPublic, 21);
+  return concat(header, cipher);
+}
+async function sendPush(sub, message, keys, options) {
+  try {
+    const body = await encryptPayload(sub, enc.encode(JSON.stringify(message)));
+    const token = await vapidToken(sub.endpoint, keys, options.subject);
+    const headers = {
+      "Content-Type": "application/octet-stream",
+      "Content-Encoding": "aes128gcm",
+      TTL: String(options.ttl ?? 24 * 3600),
+      Urgency: options.urgency ?? "normal",
+      Authorization: `vapid t=${token}, k=${keys.publicKey}`
+    };
+    if (options.topic) headers.Topic = options.topic;
+    const res = await fetch(sub.endpoint, {
+      method: "POST",
+      headers,
+      body: bs(body),
+      signal: AbortSignal.timeout(15e3)
+    });
+    const text = res.ok ? "" : (await res.text().catch(() => "")).slice(0, 300);
+    if (res.ok) await res.body?.cancel().catch(() => {
+    });
+    return {
+      ok: res.ok,
+      status: res.status,
+      gone: res.status === 404 || res.status === 410,
+      error: res.ok ? void 0 : `HTTP ${res.status}${text ? ` : ${text}` : ""}`
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      status: 0,
+      gone: false,
+      error: e.message
+    };
+  }
+}
+
+// supabase/functions/castor-jobs/notify.ts
+var frNum = (v, digits = 2) => v.toLocaleString("fr-FR", {
+  minimumFractionDigits: digits,
+  maximumFractionDigits: digits
+}).replace(/ | /g, " ");
+var euro = (v) => `${frNum(v)} \u20AC`;
+var signed = (v, digits = 2) => `${v > 0 ? "+" : v < 0 ? "\u2212" : ""}${frNum(Math.abs(v), digits)}`;
+var dateFr = (d) => `${d.slice(8, 10)}/${d.slice(5, 7)}/${d.slice(0, 4)}`;
+var dayMonth = (d) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
+var plural = (n, one, many) => `${n} ${n > 1 ? many : one}`;
+async function emit(db, ev) {
+  try {
+    const id = await must(db.rpc("notification_emit", {
+      p_type: ev.type,
+      p_title: ev.title,
+      p_body: ev.body,
+      p_url: ev.url ?? void 0,
+      p_dedup: ev.dedup ?? void 0,
+      p_data: toJson(ev.data ?? {}),
+      p_target: ev.target ?? void 0,
+      p_kick: false
+    }), "notification");
+    return id !== null;
+  } catch (e) {
+    console.error(`notification ${ev.type} :`, errorMessage(e));
+    return false;
+  }
+}
+async function recipients(db, type) {
+  return await must(db.rpc("notification_recipients", {
+    p_type: type
+  }), "destinataires");
+}
+async function loadStates(db, type, users) {
+  if (users.length === 0) return /* @__PURE__ */ new Map();
+  const rows = await must(db.from("notification_state").select("user_id, state").eq("type", type).in("user_id", users), "m\xE9moire des alertes");
+  return new Map(rows.map((r) => [
+    r.user_id,
+    r.state ?? {}
+  ]));
+}
+async function saveState(db, type, userId, state) {
+  await must(db.from("notification_state").upsert({
+    user_id: userId,
+    type,
+    state: toJson(state),
+    updated_at: (/* @__PURE__ */ new Date()).toISOString()
+  }), "m\xE9moire des alertes");
+}
+async function safely(label, fn) {
+  try {
+    await fn();
+  } catch (e) {
+    console.error(`notifications (${label}) :`, errorMessage(e));
+  }
+}
+var interval = (e) => `[${frNum(e.p05)} \u2013 ${frNum(e.p95)}], IF ${Math.round(e.reliability)}`;
+async function notifyEstimatePhase(db, prevState, e) {
+  if (!prevState || prevState === e.state) return;
+  const fixed = (s) => s === "frozen" || s === "computed";
+  if (e.state === "window" && prevState === "projection") {
+    await emit(db, {
+      type: "estimate_phase",
+      title: `Fen\xEAtre de calcul ouverte pour ${e.code}`,
+      body: `La premi\xE8re des ${e.windowDays} s\xE9ances qui fixent le prix est connue. Estimation : ${euro(e.central)} ${interval(e)}.`,
+      url: "/",
+      dedup: `phase:${e.code}:window`,
+      data: {
+        code: e.code,
+        state: e.state
+      }
+    });
+  } else if (fixed(e.state) && !fixed(prevState)) {
+    await emit(db, {
+      type: "estimate_phase",
+      title: e.state === "computed" ? `Prix ${e.code} fig\xE9 : ${euro(e.central)}` : `Prix ${e.code} quasi fig\xE9`,
+      body: e.state === "computed" ? `Les ${e.windowDays} s\xE9ances sont connues et la date du CA aussi : le prix calcul\xE9 est ${euro(e.central)}, en attendant l\u2019avis officiel.` : `Toutes les s\xE9ances des dates de CA possibles sont connues. Estimation : ${euro(e.central)} ${interval(e)}.`,
+      url: "/",
+      dedup: `phase:${e.code}:fixed`,
+      data: {
+        code: e.code,
+        state: e.state
+      }
+    });
+  }
+}
+async function notifyEstimateMove(db, e) {
+  const list = await recipients(db, "estimate_move");
+  const states = await loadStates(db, "estimate_move", list.map((r) => r.user_id));
+  let sent = 0;
+  for (const r of list) {
+    const threshold = Math.max(0.01, num(r.params.threshold) ?? 0.5);
+    const st = states.get(r.user_id) ?? {};
+    const last = num(st.central);
+    if (st.code !== e.code || last === null) {
+      await saveState(db, "estimate_move", r.user_id, {
+        code: e.code,
+        central: e.central,
+        at: (/* @__PURE__ */ new Date()).toISOString()
+      });
+      continue;
+    }
+    const delta = Math.round((e.central - last) * 100) / 100;
+    if (Math.abs(delta) + 1e-9 < threshold) continue;
+    const ok = await emit(db, {
+      type: "estimate_move",
+      target: r.user_id,
+      title: `Estimation ${e.code} : ${euro(e.central)} (${signed(delta)} \u20AC)`,
+      body: `Intervalle \xE0 90 % ${interval(e)}. Pr\xE9c\xE9dente alerte : ${euro(last)}${typeof st.at === "string" ? ` le ${dayMonth(parisDateOf(Date.parse(st.at)))}` : ""}.`,
+      url: "/",
+      dedup: `move:${e.code}:${r.user_id}:${e.estimateId}`,
+      data: {
+        code: e.code,
+        central: e.central,
+        previous: last,
+        delta
+      }
+    });
+    if (ok) sent++;
+    await saveState(db, "estimate_move", r.user_id, {
+      code: e.code,
+      central: e.central,
+      at: (/* @__PURE__ */ new Date()).toISOString()
+    });
+  }
+  return sent;
+}
+async function notifyPriceAlerts(db, quote) {
+  const list = await recipients(db, "price_alert");
+  const active = list.filter((r) => num(r.params.above) !== null || num(r.params.below) !== null);
+  if (active.length === 0) return 0;
+  const states = await loadStates(db, "price_alert", active.map((r) => r.user_id));
+  const change = quote.prevClose ? ` (${signed((quote.price / quote.prevClose - 1) * 100, 1)} % sur la veille)` : "";
+  let sent = 0;
+  for (const r of active) {
+    const above = num(r.params.above);
+    const below = num(r.params.below);
+    const st = {
+      ...states.get(r.user_id) ?? {}
+    };
+    let changed = false;
+    if (above !== null) {
+      if (st.above !== above && quote.price >= above) {
+        if (await emit(db, {
+          type: "price_alert",
+          target: r.user_id,
+          title: `VINCI au-dessus de ${euro(above)}`,
+          body: `Cours ${euro(quote.price)}${change}, diff\xE9r\xE9 de 15 min.`,
+          url: "/graphique",
+          dedup: `price:${r.user_id}:above:${above}:${quote.time}`,
+          data: {
+            price: quote.price,
+            threshold: above,
+            side: "above"
+          }
+        })) sent++;
+        st.above = above;
+        changed = true;
+      } else if (st.above != null && quote.price < st.above * 0.995) {
+        st.above = null;
+        changed = true;
+      }
+    }
+    if (below !== null) {
+      if (st.below !== below && quote.price <= below) {
+        if (await emit(db, {
+          type: "price_alert",
+          target: r.user_id,
+          title: `VINCI en dessous de ${euro(below)}`,
+          body: `Cours ${euro(quote.price)}${change}, diff\xE9r\xE9 de 15 min.`,
+          url: "/graphique",
+          dedup: `price:${r.user_id}:below:${below}:${quote.time}`,
+          data: {
+            price: quote.price,
+            threshold: below,
+            side: "below"
+          }
+        })) sent++;
+        st.below = below;
+        changed = true;
+      } else if (st.below != null && quote.price > st.below * 1.005) {
+        st.below = null;
+        changed = true;
+      }
+    }
+    if (changed) await saveState(db, "price_alert", r.user_id, st);
+  }
+  return sent;
+}
+async function latestEstimate(db, code) {
+  return await must(db.from("estimates").select("id, central, p05, p95, reliability, state").eq("quadrimester_code", code).in("kind", [
+    "scheduled",
+    "manual"
+  ]).order("computed_at", {
+    ascending: false
+  }).limit(1).maybeSingle(), "derni\xE8re estimation");
+}
+function boardText(q) {
+  if (q.board_date) return `CA le ${dateFr(q.board_date)}`;
+  if (q.board_slot_start && q.board_slot_end) return `CA attendu entre le ${dayMonth(q.board_slot_start)} et le ${dateFr(q.board_slot_end)}`;
+  return "date du CA inconnue";
+}
+async function dailyChecks(db, market, today, missing) {
+  const current = market.quads.find((q) => q.start_date <= today && q.end_date >= today) ?? null;
+  const next = market.quads.filter((q) => q.start_date > today && q.official_price === null)[0] ?? null;
+  const est = next ? await latestEstimate(db, next.code) : null;
+  const estText = next && est ? `Prix ${next.code} estim\xE9 : ${euro(Number(est.central))} ${interval({
+    p05: Number(est.p05),
+    p95: Number(est.p95),
+    reliability: Number(est.reliability)
+  })}.` : "";
+  if (current) {
+    const days = diffDays(current.payment_close_date, today);
+    if (days >= 0 && days <= 3) {
+      await emit(db, {
+        type: "payment_deadline",
+        title: days === 0 ? `Dernier jour de versement Castor (${current.code})` : `Versements Castor : cl\xF4ture le ${dateFr(current.payment_close_date)}`,
+        body: `${days === 0 ? "Les versements ferment ce soir." : `Plus que ${plural(days, "jour", "jours")}.`}${estText ? ` ${estText}` : ""}`,
+        url: "/",
+        dedup: `deadline:${current.code}:${days === 0 ? "J0" : "J-3"}`,
+        data: {
+          code: current.code,
+          days
+        }
+      });
+    }
+  }
+  if (weekday(today) === 1 && next) {
+    const last = market.rows[market.rows.length - 1];
+    const close = num(last?.close) ?? num(last?.open);
+    await emit(db, {
+      type: "weekly_digest",
+      title: est ? `Castor ${next.code} : ${euro(Number(est.central))}` : `Castor ${next.code} : semaine du ${dayMonth(today)}`,
+      body: [
+        est ? `Intervalle \xE0 90 % ${interval({
+          p05: Number(est.p05),
+          p95: Number(est.p95),
+          reliability: Number(est.reliability)
+        })}.` : "Pas encore d\u2019estimation.",
+        `${boardText(next)}.`,
+        close !== null && last ? `Cl\xF4ture VINCI du ${dayMonth(last.trade_date)} : ${euro(close)}.` : ""
+      ].filter(Boolean).join(" "),
+      url: "/",
+      dedup: `digest:${today}`
+    });
+  }
+  const prevSession = market.calendar.previousSession(today);
+  const recent = await must(db.from("job_runs").select("started_at").eq("job", "session").eq("status", "success").gte("started_at", `${addDays(today, -12)}T00:00:00Z`).order("started_at", {
+    ascending: false
+  }), "journal");
+  if (recent.length > 0 && !recent.some((r) => parisDateOf(Date.parse(r.started_at)) === prevSession)) {
+    const row = market.rows.find((r) => r.trade_date === prevSession);
+    await emit(db, {
+      type: "job_missed",
+      title: `S\xE9ance du ${dateFr(prevSession)} non collect\xE9e le soir`,
+      body: row?.close ? "La t\xE2che de 18 h n\u2019a pas abouti ; le rattrapage de ce matin a r\xE9cup\xE9r\xE9 la s\xE9ance. V\xE9rifier pg_cron et le journal." : "La t\xE2che de 18 h n\u2019a pas abouti et la s\xE9ance manque toujours : relancer la collecte ou importer un CSV.",
+      url: "/admin/journal",
+      dedup: `missed:${prevSession}`
+    });
+  }
+  if (missing.length > 0) {
+    await emit(db, {
+      type: "data_anomaly",
+      title: `${plural(missing.length, "s\xE9ance manquante", "s\xE9ances manquantes")} dans les cours`,
+      body: `${missing.slice(0, 5).map(dateFr).join(", ")}${missing.length > 5 ? "\u2026" : ""} : ouverture ou cl\xF4ture absente des sources. Corriger ou importer un CSV.`,
+      url: "/admin/cours",
+      dedup: `missing:${missing.join(",")}`
+    });
+  }
+  if (next) {
+    if (next.board_status === "estimated" && next.board_slot_start && diffDays(next.board_slot_start, today) <= 7) {
+      await emit(db, {
+        type: "data_entry",
+        title: `Date du CA \xE0 saisir pour ${next.code}`,
+        body: `${boardText(next)}. Saisir la date d\xE8s sa publication : l\u2019estimation se resserre aussit\xF4t.`,
+        url: `/admin/quadrimestres/${next.code.replace("/", "-")}`,
+        dedup: `entry:board:${next.code}`
+      });
+    }
+    const after = [
+      next.board_date ?? next.board_slot_end,
+      current?.payment_close_date ?? null
+    ].filter((d) => Boolean(d)).sort().pop();
+    if (after && diffDays(today, after) >= 3) {
+      await emit(db, {
+        type: "data_entry",
+        title: `Prix officiel ${next.code} non saisi`,
+        body: `Le CA et la cl\xF4ture des versements sont pass\xE9s depuis le ${dateFr(after)} : saisir le prix de l\u2019avis VINCI (Admin \u203A Quadrimestres).`,
+        url: `/admin/quadrimestres/${next.code.replace("/", "-")}`,
+        dedup: `entry:price:${next.code}`
+      });
+    }
+  }
+}
+async function notifySpreads(db, spreads) {
+  if (spreads.length === 0) return;
+  const label = (f) => f === "open" ? "ouverture" : "cl\xF4ture";
+  await emit(db, {
+    type: "data_anomaly",
+    title: `\xC9cart Yahoo / Euronext sur ${plural(spreads.length, "cours", "cours")}`,
+    body: `${spreads.slice(0, 3).map((s) => `${dayMonth(s.date)} ${label(s.field)} ${frNum(s.ours)} / ${frNum(s.theirs)} (${frNum(s.bps / 100, 1)} %)`).join(" ; ")}${spreads.length > 3 ? " ; \u2026" : ""}. V\xE9rifier la s\xE9ance (Admin \u203A Donn\xE9es de cours).`,
+    url: "/admin/cours",
+    dedup: `spread:${spreads.map((s) => `${s.date}${s.field[0]}`).join(",")}`
+  });
+}
+async function notifyFallback(db, date, reason) {
+  await emit(db, {
+    type: "data_anomaly",
+    title: "Repli sur Euronext",
+    body: `Yahoo indisponible (${reason.slice(0, 160)}) : cours du ${dateFr(date)} pris chez Euronext.`,
+    url: "/admin/journal",
+    dedup: `fallback:${date}`
+  });
+}
+async function notifyAberrantOpen(db, market, date) {
+  const i = market.rows.findIndex((r) => r.trade_date === date);
+  if (i <= 0) return;
+  const open = num(market.rows[i].open);
+  const prev = num(market.rows[i - 1].close);
+  if (open === null || prev === null) return;
+  const move = open / prev - 1;
+  if (Math.abs(move) <= 0.08 || market.dividends.some((d) => d.exDate === date)) return;
+  await emit(db, {
+    type: "data_anomaly",
+    title: `Ouverture du ${dateFr(date)} suspecte`,
+    body: `Ouverture ${euro(open)}, ${signed(move * 100, 1)} % sur la cl\xF4ture pr\xE9c\xE9dente (${euro(prev)}), sans dividende ce jour-l\xE0. Elle entre dans la moyenne des 20 s\xE9ances : v\xE9rifier.`,
+    url: "/admin/cours",
+    dedup: `aberrant:${date}`
+  });
+}
+async function notifyAmbiguousInference(db, results) {
+  for (const r of results.filter((x) => x.matches.length > 1)) {
+    const dates = r.matches.map((m) => m.date);
+    await emit(db, {
+      type: "inference",
+      title: `Date du CA ambigu\xEB pour ${r.code}`,
+      body: `${dates.length} dates donnent le prix officiel au centime : ${dates.slice(0, 5).map(dateFr).join(", ")}. Aucune n\u2019est appliqu\xE9e ; saisir la date de l\u2019avis.`,
+      url: `/admin/quadrimestres/${r.code.replace("/", "-")}`,
+      dedup: `infer:${r.code}:${dates.join(",")}`
+    });
+  }
+}
+async function pushKeys(db) {
+  let keys = await must(db.rpc("castor_push_keys"), "cl\xE9s VAPID");
+  if (!keys?.public || !keys?.private) {
+    const gen = await generateVapidKeys();
+    keys = await must(db.rpc("castor_push_keys_init", {
+      p_public: gen.publicKey,
+      p_private: JSON.stringify(gen.privateJwk)
+    }), "cl\xE9s VAPID");
+    if (!keys?.public || !keys?.private) throw new Error("cl\xE9s VAPID non enregistr\xE9es : Vault est-il disponible ?");
+  }
+  return {
+    publicKey: keys.public,
+    privateJwk: JSON.parse(keys.private)
+  };
+}
+function vapidSubject(config) {
+  const site = config.site_url ?? "";
+  return /^https:\/\//.test(site) ? site.replace(/\/$/, "") : "mailto:notifications@castor-tracker.invalid";
+}
+function absoluteUrl(config, path) {
+  if (!path) return config.site_url ?? null;
+  if (/^https?:\/\//.test(path)) return path;
+  return config.site_url ? `${config.site_url.replace(/\/$/, "")}${path}` : null;
+}
+function tagOf(ev) {
+  const replaceable = [
+    "estimate_move",
+    "estimate_phase",
+    "price_alert",
+    "weekly_digest",
+    "payment_deadline"
+  ];
+  return replaceable.includes(ev.type) ? `castor-${ev.type}` : `castor-${ev.type}-${ev.id}`;
+}
+function pushMessage(ev) {
+  return {
+    title: ev.title,
+    body: ev.body,
+    url: ev.url ?? "/",
+    tag: tagOf(ev),
+    urgent: ev.urgent,
+    type: ev.type,
+    ts: ev.created_at
+  };
+}
+async function sendWebhook(target, ev, config) {
+  const link = absoluteUrl(config, ev.url);
+  let url = target.webhook_url;
+  let body;
+  switch (target.webhook_format) {
+    case "ntfy": {
+      const u = new URL(url);
+      const parts = u.pathname.split("/").filter(Boolean);
+      const topic = parts.pop();
+      if (!topic) throw new Error("URL ntfy sans sujet (attendu : https://ntfy.sh/mon-sujet)");
+      url = `${u.origin}/${parts.join("/")}`;
+      body = {
+        topic,
+        title: ev.title,
+        message: ev.body,
+        priority: ev.urgent ? 5 : 3,
+        tags: [
+          ev.urgent ? "rotating_light" : "chart_with_upwards_trend"
+        ],
+        ...link ? {
+          click: link
+        } : {}
+      };
+      break;
+    }
+    case "discord":
+      body = {
+        username: "Castor Tracker",
+        embeds: [
+          {
+            title: ev.title,
+            description: ev.body,
+            ...link ? {
+              url: link
+            } : {},
+            color: ev.urgent ? 11805464 : 745086,
+            timestamp: ev.created_at
+          }
+        ]
+      };
+      break;
+    case "slack":
+      body = {
+        text: `*${ev.title}*
+${ev.body}${link ? `
+<${link}|Ouvrir Castor Tracker>` : ""}`
+      };
+      break;
+    default:
+      body = {
+        source: "castor-tracker",
+        id: ev.id,
+        type: ev.type,
+        title: ev.title,
+        body: ev.body,
+        url: link ?? ev.url,
+        urgent: ev.urgent,
+        created_at: ev.created_at,
+        data: ev.data
+      };
+  }
+  const headers = {
+    "Content-Type": "application/json",
+    "User-Agent": "castor-tracker"
+  };
+  if (target.webhook_secret) headers.Authorization = target.webhook_secret;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(1e4)
+    });
+    const text = res.ok ? "" : (await res.text().catch(() => "")).slice(0, 300);
+    if (res.ok) await res.body?.cancel().catch(() => {
+    });
+    return {
+      ok: res.ok,
+      status: res.status,
+      error: res.ok ? void 0 : `HTTP ${res.status}${text ? ` : ${text}` : ""}`
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      status: 0,
+      error: errorMessage(e)
+    };
+  }
+}
+var MAX_ATTEMPTS = 3;
+async function pushToUser(db, subs, message, keys, config, urgent) {
+  const results = await Promise.all(subs.map(async (s) => {
+    const r = await sendPush(s, message, keys, {
+      subject: vapidSubject(config),
+      urgency: urgent ? "high" : "normal",
+      ttl: urgent ? 6 * 3600 : 24 * 3600
+    });
+    if (r.gone) {
+      await db.from("push_subscriptions").delete().eq("id", s.id);
+    } else if (r.ok) {
+      await db.from("push_subscriptions").update({
+        last_success_at: (/* @__PURE__ */ new Date()).toISOString(),
+        failures: 0,
+        last_error: null
+      }).eq("id", s.id);
+    } else {
+      const cur = await db.from("push_subscriptions").select("failures").eq("id", s.id).maybeSingle();
+      await db.from("push_subscriptions").update({
+        failures: (cur.data?.failures ?? 0) + 1,
+        last_error: r.error ?? null
+      }).eq("id", s.id);
+    }
+    return {
+      id: s.id,
+      ok: r.ok,
+      status: r.status,
+      error: r.gone ? "abonnement expir\xE9 (supprim\xE9)" : r.error
+    };
+  }));
+  return {
+    ok: results.some((r) => r.ok),
+    results
+  };
+}
+async function dispatch(db) {
+  const report = {
+    fannedOut: 0,
+    claimed: 0,
+    sent: 0,
+    retried: 0,
+    failed: 0,
+    skipped: 0
+  };
+  report.fannedOut = Number(await must(db.rpc("notification_fanout"), "r\xE9partition des notifications")) || 0;
+  const claimed = await must(db.rpc("notification_claim", {
+    p_limit: 200
+  }), "envois dus");
+  report.claimed = claimed.length;
+  if (claimed.length === 0) return report;
+  const config = await loadConfig(db);
+  const pushUsers = [
+    ...new Set(claimed.filter((c) => c.channel === "push").map((c) => c.user_id))
+  ];
+  const hookUsers = [
+    ...new Set(claimed.filter((c) => c.channel === "webhook").map((c) => c.user_id))
+  ];
+  const subs = pushUsers.length ? await must(db.from("push_subscriptions").select("id, user_id, endpoint, p256dh, auth").in("user_id", pushUsers), "abonnements") : [];
+  const hooks = hookUsers.length ? await must(db.from("notification_settings").select("user_id, webhook_url, webhook_format, webhook_secret, webhook_enabled").in("user_id", hookUsers), "webhooks") : [];
+  let keys = null;
+  if (subs.length > 0) {
+    try {
+      keys = await pushKeys(db);
+    } catch (e) {
+      console.error("cl\xE9s VAPID :", errorMessage(e));
+    }
+  }
+  const finish = async (c, outcome, error) => {
+    if (outcome === "sent") {
+      report.sent++;
+      await db.from("notification_deliveries").update({
+        status: "sent",
+        sent_at: (/* @__PURE__ */ new Date()).toISOString(),
+        error: null
+      }).eq("id", c.id);
+    } else if (outcome === "skipped") {
+      report.skipped++;
+      await db.from("notification_deliveries").update({
+        status: "skipped",
+        error: error ?? null
+      }).eq("id", c.id);
+    } else if (c.attempts >= MAX_ATTEMPTS) {
+      report.failed++;
+      await db.from("notification_deliveries").update({
+        status: "failed",
+        error: error ?? null
+      }).eq("id", c.id);
+    } else {
+      report.retried++;
+      const retryAt = new Date(Date.now() + 15 * 6e4 * c.attempts).toISOString();
+      await db.from("notification_deliveries").update({
+        status: "pending",
+        not_before: retryAt,
+        error: error ?? null
+      }).eq("id", c.id);
+    }
+  };
+  const work = claimed.map((c) => async () => {
+    try {
+      if (c.channel === "push") {
+        const mine = subs.filter((s) => s.user_id === c.user_id);
+        if (mine.length === 0) return finish(c, "skipped", "aucun appareil abonn\xE9");
+        if (!keys) return finish(c, "error", "cl\xE9s VAPID indisponibles");
+        const r2 = await pushToUser(db, mine, pushMessage(c.event), keys, config, c.event.urgent);
+        if (r2.ok) return finish(c, "sent");
+        if (r2.results.every((x) => x.error === "abonnement expir\xE9 (supprim\xE9)")) return finish(c, "skipped", "abonnements expir\xE9s");
+        return finish(c, "error", r2.results.map((x) => x.error).filter(Boolean).join(" ; ").slice(0, 500));
+      }
+      const hook = hooks.find((h) => h.user_id === c.user_id);
+      if (!hook?.webhook_enabled || !hook.webhook_url) return finish(c, "skipped", "webhook d\xE9sactiv\xE9");
+      const r = await sendWebhook(hook, c.event, config);
+      return r.ok ? finish(c, "sent") : finish(c, "error", r.error);
+    } catch (e) {
+      return finish(c, "error", errorMessage(e));
+    }
+  });
+  for (let i = 0; i < work.length; i += 8) await Promise.all(work.slice(i, i + 8).map((w) => w()));
+  return report;
+}
+async function heartbeat(db) {
+  const row = await db.from("admin_config").select("heartbeat_url").maybeSingle();
+  const url = row.data?.heartbeat_url;
+  if (!url) return;
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      signal: AbortSignal.timeout(5e3)
+    });
+    await res.body?.cancel().catch(() => {
+    });
+  } catch (e) {
+    console.error("battement du moniteur :", errorMessage(e));
+  }
+}
+
 // supabase/functions/castor-jobs/providers.ts
 var USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Safari/537.36 CastorTracker/1.0";
 var YAHOO_HOSTS = [
@@ -1590,7 +2366,9 @@ async function storeQuote(db, chart) {
   }), "cours en s\xE9ance");
   return {
     price,
-    day
+    day,
+    prevClose,
+    time: new Date(time).toISOString()
   };
 }
 async function controlWithEuronext(db, config, from, to) {
@@ -1787,10 +2565,29 @@ async function estimateAndStore(ctx, market, kind, code) {
     referencePrice: referencePriceFor(market, target, today),
     seed: randomSeed()
   });
+  const previous = await must(ctx.db.from("estimates").select("state").eq("quadrimester_code", target.code).in("kind", [
+    "scheduled",
+    "manual"
+  ]).order("computed_at", {
+    ascending: false
+  }).limit(1).maybeSingle(), "estimation pr\xE9c\xE9dente");
   const row = await must(ctx.db.from("estimates").insert(estimateRow(target.code, kind, market, result, board)).select("id").single(), "enregistrement de l\u2019estimation");
+  const summary = {
+    estimateId: row.id,
+    code: target.code,
+    state: result.state,
+    central: result.central,
+    p05: result.p05,
+    p95: result.p95,
+    reliability: result.reliability,
+    known: result.knownMostProbable,
+    windowDays: market.params.window_days
+  };
+  await safely("phase", () => notifyEstimatePhase(ctx.db, previous?.state ?? null, summary));
   return {
     message: `${target.code} : ${fr(result.central)} \u20AC [${fr(result.p05)} \u2013 ${fr(result.p95)}], IF ${Math.round(result.reliability)}`,
-    estimateId: row.id,
+    estimateId: summary.estimateId,
+    summary,
     details: {
       code: target.code,
       state: result.state,
@@ -1839,6 +2636,7 @@ var openTask = {
       today
     ], "yahoo", "open");
     const market = await loadMarket(ctx.db);
+    await safely("ouverture", () => notifyAberrantOpen(ctx.db, market, ctx.clock.date));
     const est = await estimateAndStore(ctx, market, ctx.caller.trigger === "cron" ? "scheduled" : "manual");
     return {
       message: `ouverture ${fr(today.open)} \u20AC ; ${est.message}`,
@@ -1871,6 +2669,7 @@ var quoteTask = {
         estimateMessage = (await estimateAndStore(ctx, market, "scheduled")).message;
       }
     }
+    if (quote) await safely("alertes de cours", () => notifyPriceAlerts(ctx.db, quote));
     return {
       message: quote ? `cours ${fr(quote.price)} \u20AC` : "cours indisponible",
       details: {
@@ -1894,18 +2693,20 @@ var sessionTask = {
     const warnings = [];
     let stored = 0;
     let dividends = 0;
+    let quote = null;
     try {
       const chart = await fetchYahoo(config.yahoo_symbol, {
         range: "1mo"
       });
       stored = await storeBars(ctx.db, completedBars(chart.bars, ctx.clock), "yahoo", "full");
       dividends = await storeDividends(ctx.db, chart);
-      await storeQuote(ctx.db, chart);
+      quote = await storeQuote(ctx.db, chart);
     } catch (e) {
       warnings.push(e.message);
       const rows = await fetchEuronext(config.euronext_code, addDays(ctx.clock.date, -30), ctx.clock.date, config.euronext_history_url);
       stored = await storeBars(ctx.db, completedBars(rows, ctx.clock), "euronext", "full");
       warnings.push(`repli sur Euronext : ${stored} s\xE9ance(s)`);
+      await safely("repli", () => notifyFallback(ctx.db, ctx.clock.date, errorMessage(e)));
     }
     const control = await controlWithEuronext(ctx.db, config, addDays(ctx.clock.date, -14), ctx.clock.date);
     if (control.error) warnings.push(`contr\xF4le Euronext impossible : ${control.error}`);
@@ -1914,6 +2715,12 @@ var sessionTask = {
     if (!todayRow?.close) throw new Error("cl\xF4ture du jour absente des sources");
     const est = await estimateAndStore(ctx, market, ctx.caller.trigger === "cron" ? "scheduled" : "manual");
     await refreshComputedPrices(ctx.db, market);
+    await safely("s\xE9ance", async () => {
+      await notifySpreads(ctx.db, control.spreads);
+      await notifyAberrantOpen(ctx.db, market, ctx.clock.date);
+      if (est.summary) await notifyEstimateMove(ctx.db, est.summary);
+      if (quote) await notifyPriceAlerts(ctx.db, quote);
+    });
     const alert = control.spreads.length > 0 ? ` ; \xC9CART de sources sur ${control.spreads.length} cours` : "";
     return {
       message: `s\xE9ance du ${ctx.clock.date} : cl\xF4ture ${fr(Number(todayRow.close))} \u20AC${alert} ; ${est.message}`,
@@ -1967,6 +2774,10 @@ var catchupTask = {
     const missing = missingSessions(market, addDays(ctx.clock.date, -days), lastClosed);
     await refreshComputedPrices(ctx.db, market);
     const est = await estimateAndStore(ctx, market, ctx.caller.trigger === "cron" ? "scheduled" : "manual");
+    await safely("rattrapage", async () => {
+      await notifySpreads(ctx.db, control.spreads);
+      await dailyChecks(ctx.db, market, ctx.clock.date, missing);
+    });
     return {
       message: `${stored} s\xE9ance(s) \xE9crite(s), ${missing.length} manquante(s) sur ${days} jours ; ${est.message}`,
       details: {
@@ -2149,6 +2960,7 @@ var inferTask = {
       run_by: ctx.caller.userId
     }), "enregistrement de l\u2019inf\xE9rence");
     if (applied > 0) await refreshComputedPrices(ctx.db, await loadMarket(ctx.db));
+    await safely("inf\xE9rence", () => notifyAmbiguousInference(ctx.db, results));
     return {
       message: results.length === 0 ? "aucun prix officiel sans date de CA connue" : `${results.filter((r) => r.matches.length === 1).length}/${results.length} date(s) retrouv\xE9e(s) sans ambigu\xEFt\xE9${apply ? `, ${applied} appliqu\xE9e(s)` : ""}`,
       details: {
@@ -2328,13 +3140,18 @@ var maintenanceTask = {
     }
     const purgeBefore = new Date(ctx.now.getTime() - 180 * 864e5).toISOString();
     const purged = await must(ctx.db.from("job_runs").delete().lt("started_at", purgeBefore).neq("status", "error").select("id"), "purge du journal");
+    const viewsBefore = new Date(ctx.now.getTime() - 400 * 864e5).toISOString();
+    const purgedViews = await must(ctx.db.from("page_views").delete().lt("at", viewsBefore).select("id"), "purge de la fr\xE9quentation");
+    const purgedNotifications = await must(ctx.db.from("notification_events").delete().lt("created_at", new Date(ctx.now.getTime() - 120 * 864e5).toISOString()).select("id"), "purge des notifications");
     const market = await loadMarket(ctx.db);
     const recalculated = await refreshComputedPrices(ctx.db, market);
     return {
       message: `${created.length} quadrimestre(s) cr\xE9\xE9(s), ${insertedHolidays.length} fermeture(s) ajout\xE9e(s), ${purged.length} entr\xE9e(s) de journal purg\xE9e(s)`,
       details: {
         created,
-        recalculated
+        recalculated,
+        purgedPageViews: purgedViews.length,
+        purgedNotifications: purgedNotifications.length
       }
     };
   }
@@ -2346,6 +3163,7 @@ function requireRole(value) {
 var usersTask = {
   cron: false,
   log: false,
+  dispatch: false,
   async run(ctx) {
     const { data, error } = await ctx.db.auth.admin.listUsers({
       page: 1,
@@ -2479,6 +3297,117 @@ var deleteUserTask = {
     };
   }
 };
+var notifyTask = {
+  cron: true,
+  log: false,
+  dispatch: false,
+  async gate(ctx) {
+    const due = await must(ctx.db.rpc("notification_due"), "notifications en attente");
+    return Number(due) > 0 ? null : "aucune notification \xE0 envoyer";
+  },
+  async run(ctx) {
+    const r = await dispatch(ctx.db);
+    return {
+      message: `${r.sent} envoy\xE9e(s), ${r.retried} \xE0 relancer, ${r.failed} en \xE9chec, ${r.skipped} sans destination`,
+      details: {
+        ...r
+      }
+    };
+  }
+};
+var pushKeyTask = {
+  cron: false,
+  access: "user",
+  log: false,
+  dispatch: false,
+  async run(ctx) {
+    const keys = await pushKeys(ctx.db);
+    const origin = typeof ctx.body.origin === "string" ? ctx.body.origin.replace(/\/+$/, "") : "";
+    if (/^https:\/\/[^/\s]+$/.test(origin)) {
+      await ctx.db.from("app_config").update({
+        site_url: origin
+      }).eq("id", true).is("site_url", null);
+    }
+    return {
+      message: "cl\xE9 publique VAPID",
+      publicKey: keys.publicKey
+    };
+  }
+};
+function testEvent(title, body) {
+  return {
+    id: 0,
+    type: "test",
+    title,
+    body,
+    url: "/compte/notifications",
+    urgent: false,
+    data: {},
+    created_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+var pushTestTask = {
+  cron: false,
+  access: "user",
+  log: false,
+  dispatch: false,
+  async run(ctx) {
+    let q = ctx.db.from("push_subscriptions").select("id, user_id, endpoint, p256dh, auth").eq("user_id", ctx.caller.userId);
+    if (typeof ctx.body.endpoint === "string") q = q.eq("endpoint", ctx.body.endpoint);
+    const subs = await must(q, "abonnements");
+    if (subs.length === 0) throw new HttpError(400, "aucun appareil abonn\xE9 : activer d\u2019abord les notifications sur cet appareil");
+    const [keys, config] = await Promise.all([
+      pushKeys(ctx.db),
+      loadConfig(ctx.db)
+    ]);
+    const ev = testEvent("Castor Tracker : notification de test", "Les notifications arrivent bien sur cet appareil.");
+    const r = await pushToUser(ctx.db, subs, pushMessage({
+      ...ev,
+      id: Date.now()
+    }), keys, config, false);
+    const okCount = r.results.filter((x) => x.ok).length;
+    return {
+      message: okCount > 0 ? `notification envoy\xE9e \xE0 ${okCount} appareil(s) sur ${r.results.length}` : `\xE9chec de l\u2019envoi : ${r.results.map((x) => x.error).join(" ; ")}`,
+      ok: okCount > 0,
+      results: r.results
+    };
+  }
+};
+var webhookTestTask = {
+  cron: false,
+  log: false,
+  dispatch: false,
+  async run(ctx) {
+    let target = ctx.body.url ? {
+      webhook_url: String(ctx.body.url),
+      webhook_format: String(ctx.body.format ?? "json"),
+      webhook_secret: typeof ctx.body.secret === "string" && ctx.body.secret ? ctx.body.secret : null
+    } : null;
+    if (!target) {
+      const saved = await must(ctx.db.from("notification_settings").select("webhook_url, webhook_format, webhook_secret").eq("user_id", ctx.caller.userId).maybeSingle(), "webhook");
+      if (!saved?.webhook_url) throw new HttpError(400, "aucun webhook enregistr\xE9");
+      target = {
+        webhook_url: saved.webhook_url,
+        webhook_format: saved.webhook_format,
+        webhook_secret: saved.webhook_secret
+      };
+    }
+    if (!/^https?:\/\//.test(target.webhook_url)) throw new HttpError(400, "URL de webhook invalide");
+    if (![
+      "json",
+      "ntfy",
+      "discord",
+      "slack"
+    ].includes(target.webhook_format)) throw new HttpError(400, "format de webhook inconnu");
+    const config = await loadConfig(ctx.db);
+    const r = await sendWebhook(target, testEvent("Castor Tracker : test du webhook", "Le webhook des administrateurs fonctionne."), config);
+    return {
+      message: r.ok ? `webhook joint (HTTP ${r.status})` : `\xE9chec du webhook : ${r.error}`,
+      ok: r.ok,
+      status: r.status
+    };
+  }
+};
 var TASKS = {
   open: openTask,
   quote: quoteTask,
@@ -2493,7 +3422,11 @@ var TASKS = {
   users: usersTask,
   invite: inviteTask,
   "set-role": setRoleTask,
-  "delete-user": deleteUserTask
+  "delete-user": deleteUserTask,
+  notify: notifyTask,
+  "push-key": pushKeyTask,
+  "push-test": pushTestTask,
+  "webhook-test": webhookTestTask
 };
 
 // supabase/functions/castor-jobs/handler.ts
@@ -2507,7 +3440,7 @@ function decodeJwtPayload(token) {
     return {};
   }
 }
-async function authenticate(req, db) {
+async function authenticate(req, db, access) {
   const cronSecret = req.headers.get("x-castor-cron");
   if (cronSecret) {
     const ok = await must(db.rpc("castor_verify_cron_secret", {
@@ -2527,7 +3460,15 @@ async function authenticate(req, db) {
     must(db.from("user_roles").select("role").eq("user_id", data.user.id).maybeSingle(), "r\xF4le"),
     must(db.from("app_config").select("admin_mfa_required").maybeSingle(), "r\xE9glages")
   ]);
-  if (role?.role !== "admin") throw new HttpError(403, "r\xE9serv\xE9 aux administrateurs");
+  const userRole = role?.role ?? null;
+  if (access === "user") {
+    if (!userRole) throw new HttpError(403, "compte sans acc\xE8s \xE0 Castor Tracker");
+    return {
+      trigger: "user",
+      userId: data.user.id
+    };
+  }
+  if (userRole !== "admin") throw new HttpError(403, "r\xE9serv\xE9 aux administrateurs");
   const mfaRequired = config?.admin_mfa_required ?? true;
   if (mfaRequired && decodeJwtPayload(token).aal !== "aal2") {
     throw new HttpError(403, "second facteur (TOTP) requis pour l\u2019administration");
@@ -2536,6 +3477,13 @@ async function authenticate(req, db) {
     trigger: "admin",
     userId: data.user.id
   };
+}
+async function dispatchQuietly(db) {
+  try {
+    await dispatch(db);
+  } catch (e) {
+    console.error("envoi des notifications :", errorMessage(e));
+  }
 }
 async function withJobLog(ctx, job, run) {
   const started = await must(ctx.db.from("job_runs").insert({
@@ -2595,7 +3543,7 @@ async function handle(req) {
     const def = TASKS[task];
     if (!def) throw new HttpError(400, `t\xE2che inconnue : ${task || "(vide)"}`);
     const db = serviceClient();
-    const caller = await authenticate(req, db);
+    const caller = await authenticate(req, db, def.access ?? "admin");
     if (caller.trigger === "cron" && !def.cron) throw new HttpError(403, `t\xE2che ${task} non planifiable`);
     if (caller.trigger === "admin") await registerEndpoint(db);
     const now = /* @__PURE__ */ new Date();
@@ -2606,6 +3554,7 @@ async function handle(req) {
       clock: parisClock(now),
       now
     };
+    if (caller.trigger === "cron" && task === "notify") await heartbeat(db);
     if (caller.trigger === "cron" && def.gate) {
       const reason = await def.gate(ctx);
       if (reason) return json({
@@ -2613,11 +3562,15 @@ async function handle(req) {
         skipped: reason
       });
     }
-    const result = def.log === false ? await def.run(ctx) : await withJobLog(ctx, task, () => def.run(ctx));
-    return json({
-      task,
-      ...result
-    });
+    try {
+      const result = def.log === false ? await def.run(ctx) : await withJobLog(ctx, task, () => def.run(ctx));
+      return json({
+        task,
+        ...result
+      });
+    } finally {
+      if (def.dispatch !== false) await dispatchQuietly(db);
+    }
   } catch (e) {
     const status = e instanceof HttpError ? e.status : 500;
     if (status >= 500) console.error(`castor-jobs ${task} :`, e);

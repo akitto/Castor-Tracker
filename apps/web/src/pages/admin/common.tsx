@@ -68,6 +68,7 @@ export const JOB_LABEL: Record<string, string> = {
   invite: 'Invitation',
   'set-role': 'Changement de rôle',
   'delete-user': 'Suppression de compte',
+  notify: 'Envoi des notifications',
 };
 
 export function percentInput(v: number): string {

@@ -64,6 +64,6 @@ if [ "${RUN_FUNCTIONS:-0}" = "1" ]; then
   SERVICE_KEY="$(printf '{"alg":"HS256","typ":"JWT"}' | base64 | tr -d '=\n' | tr '/+' '_-').$(printf '{"role":"service_role"}' | base64 | tr -d '=\n' | tr '/+' '_-').test"
   (cd "$ROOT/supabase/functions" && \
     SUPABASE_URL="http://127.0.0.1:$API_PORT" SUPABASE_SERVICE_ROLE_KEY="$SERVICE_KEY" CASTOR_TEST_CRON_SECRET="$SECRET" \
-    "$DENO" test --config deno.json --allow-net --allow-env --allow-read ../tests/function/castor-jobs.test.ts) || {
+    "$DENO" test --config deno.json --allow-net --allow-env --allow-read ../tests/function/castor-jobs.test.ts ../tests/function/webpush.test.ts) || {
       echo "--- journal de la doublure API"; tail -30 "$WORK/api.log"; exit 1; }
 fi

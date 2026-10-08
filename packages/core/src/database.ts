@@ -4,6 +4,24 @@ export type Json = string | number | boolean | null | { [key: string]: Json | un
 export type Database = {
   public: {
     Tables: {
+      admin_config: {
+        Row: {
+          id: boolean;
+          heartbeat_url: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          id?: boolean;
+          heartbeat_url?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          id?: boolean;
+          heartbeat_url?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
       app_config: {
         Row: {
           id: boolean;
@@ -15,6 +33,7 @@ export type Database = {
           euronext_history_url: string | null;
           alert_spread_bps: number;
           updated_at: string;
+          vapid_public_key: string | null;
         };
         Insert: {
           id?: boolean;
@@ -26,6 +45,7 @@ export type Database = {
           euronext_history_url?: string | null;
           alert_spread_bps?: number;
           updated_at?: string;
+          vapid_public_key?: string | null;
         };
         Update: {
           id?: boolean;
@@ -37,6 +57,7 @@ export type Database = {
           euronext_history_url?: string | null;
           alert_spread_bps?: number;
           updated_at?: string;
+          vapid_public_key?: string | null;
         };
         Relationships: [];
       };
@@ -343,6 +364,258 @@ export type Database = {
         };
         Relationships: [];
       };
+      notification_deliveries: {
+        Row: {
+          id: number;
+          event_id: number;
+          user_id: string;
+          channel: string;
+          status: string;
+          not_before: string;
+          claimed_at: string | null;
+          attempts: number;
+          sent_at: string | null;
+          error: string | null;
+        };
+        Insert: {
+          id?: number;
+          event_id: number;
+          user_id: string;
+          channel: string;
+          status?: string;
+          not_before?: string;
+          claimed_at?: string | null;
+          attempts?: number;
+          sent_at?: string | null;
+          error?: string | null;
+        };
+        Update: {
+          id?: number;
+          event_id?: number;
+          user_id?: string;
+          channel?: string;
+          status?: string;
+          not_before?: string;
+          claimed_at?: string | null;
+          attempts?: number;
+          sent_at?: string | null;
+          error?: string | null;
+        };
+        Relationships: [];
+      };
+      notification_events: {
+        Row: {
+          id: number;
+          type: string;
+          target_user: string | null;
+          dedup_key: string | null;
+          title: string;
+          body: string;
+          url: string | null;
+          urgent: boolean;
+          data: Json;
+          created_at: string;
+          fanned_out_at: string | null;
+        };
+        Insert: {
+          id?: number;
+          type: string;
+          target_user?: string | null;
+          dedup_key?: string | null;
+          title: string;
+          body: string;
+          url?: string | null;
+          urgent?: boolean;
+          data?: Json;
+          created_at?: string;
+          fanned_out_at?: string | null;
+        };
+        Update: {
+          id?: number;
+          type?: string;
+          target_user?: string | null;
+          dedup_key?: string | null;
+          title?: string;
+          body?: string;
+          url?: string | null;
+          urgent?: boolean;
+          data?: Json;
+          created_at?: string;
+          fanned_out_at?: string | null;
+        };
+        Relationships: [];
+      };
+      notification_prefs: {
+        Row: {
+          user_id: string;
+          type: string;
+          enabled: boolean;
+          params: Json;
+          updated_at: string;
+        };
+        Insert: {
+          user_id: string;
+          type: string;
+          enabled: boolean;
+          params?: Json;
+          updated_at?: string;
+        };
+        Update: {
+          user_id?: string;
+          type?: string;
+          enabled?: boolean;
+          params?: Json;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      notification_settings: {
+        Row: {
+          user_id: string;
+          enabled: boolean;
+          quiet_hours: boolean;
+          webhook_enabled: boolean;
+          webhook_url: string | null;
+          webhook_format: string;
+          webhook_secret: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          user_id: string;
+          enabled?: boolean;
+          quiet_hours?: boolean;
+          webhook_enabled?: boolean;
+          webhook_url?: string | null;
+          webhook_format?: string;
+          webhook_secret?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          user_id?: string;
+          enabled?: boolean;
+          quiet_hours?: boolean;
+          webhook_enabled?: boolean;
+          webhook_url?: string | null;
+          webhook_format?: string;
+          webhook_secret?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      notification_state: {
+        Row: {
+          user_id: string;
+          type: string;
+          state: Json;
+          updated_at: string;
+        };
+        Insert: {
+          user_id: string;
+          type: string;
+          state?: Json;
+          updated_at?: string;
+        };
+        Update: {
+          user_id?: string;
+          type?: string;
+          state?: Json;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      notification_types: {
+        Row: {
+          code: string;
+          audience: string;
+          label: string;
+          description: string;
+          default_enabled: boolean;
+          urgent: boolean;
+          sort: number;
+        };
+        Insert: {
+          code: string;
+          audience: string;
+          label: string;
+          description: string;
+          default_enabled?: boolean;
+          urgent?: boolean;
+          sort?: number;
+        };
+        Update: {
+          code?: string;
+          audience?: string;
+          label?: string;
+          description?: string;
+          default_enabled?: boolean;
+          urgent?: boolean;
+          sort?: number;
+        };
+        Relationships: [];
+      };
+      page_views: {
+        Row: {
+          id: number;
+          at: string;
+          path: string;
+          visitor: string | null;
+          signed_in: boolean;
+        };
+        Insert: {
+          id?: number;
+          at?: string;
+          path: string;
+          visitor?: string | null;
+          signed_in?: boolean;
+        };
+        Update: {
+          id?: number;
+          at?: string;
+          path?: string;
+          visitor?: string | null;
+          signed_in?: boolean;
+        };
+        Relationships: [];
+      };
+      push_subscriptions: {
+        Row: {
+          id: number;
+          user_id: string;
+          endpoint: string;
+          p256dh: string;
+          auth: string;
+          user_agent: string | null;
+          created_at: string;
+          last_success_at: string | null;
+          last_error: string | null;
+          failures: number;
+        };
+        Insert: {
+          id?: number;
+          user_id: string;
+          endpoint: string;
+          p256dh: string;
+          auth: string;
+          user_agent?: string | null;
+          created_at?: string;
+          last_success_at?: string | null;
+          last_error?: string | null;
+          failures?: number;
+        };
+        Update: {
+          id?: number;
+          user_id?: string;
+          endpoint?: string;
+          p256dh?: string;
+          auth?: string;
+          user_agent?: string | null;
+          created_at?: string;
+          last_success_at?: string | null;
+          last_error?: string | null;
+          failures?: number;
+        };
+        Relationships: [];
+      };
       quadrimesters: {
         Row: {
           code: string;
@@ -640,6 +913,39 @@ export type Database = {
         };
         Relationships: [];
       };
+      v_my_notifications: {
+        Row: {
+          id: number | null;
+          type: string | null;
+          title: string | null;
+          body: string | null;
+          url: string | null;
+          created_at: string | null;
+          delivered: boolean | null;
+          sent_at: string | null;
+          pending: boolean | null;
+        };
+        Relationships: [];
+      };
+      v_notification_log: {
+        Row: {
+          id: number | null;
+          type: string | null;
+          title: string | null;
+          body: string | null;
+          url: string | null;
+          urgent: boolean | null;
+          personal: boolean | null;
+          created_at: string | null;
+          fanned_out_at: string | null;
+          sent: number | null;
+          pending: number | null;
+          failed: number | null;
+          skipped: number | null;
+          last_error: string | null;
+        };
+        Relationships: [];
+      };
     };
     Functions: {
       activate_calc_params: {
@@ -648,6 +954,10 @@ export type Database = {
       };
       admin_import_prices: {
         Args: { p_rows: Json; p_reason: string; p_overwrite?: boolean };
+        Returns: Json;
+      };
+      admin_page_views_hourly: {
+        Args: { p_hours?: number };
         Returns: Json;
       };
       admin_set_official_price: {
@@ -661,6 +971,14 @@ export type Database = {
       castor_call: {
         Args: { p_task: string; p_body?: Json };
         Returns: number;
+      };
+      castor_push_keys: {
+        Args: Record<PropertyKey, never>;
+        Returns: Json;
+      };
+      castor_push_keys_init: {
+        Args: { p_public: string; p_private: string };
+        Returns: Json;
       };
       castor_register_endpoint: {
         Args: { p_url: string };
@@ -686,6 +1004,14 @@ export type Database = {
         Args: { p_secret: string };
         Returns: boolean;
       };
+      fr_euro: {
+        Args: { p: number };
+        Returns: string;
+      };
+      fr_signed: {
+        Args: { p: number; p_digits?: number };
+        Returns: string;
+      };
       has_role: {
         Args: Record<PropertyKey, never>;
         Returns: boolean;
@@ -702,6 +1028,34 @@ export type Database = {
         Args: Record<PropertyKey, never>;
         Returns: Json;
       };
+      notification_claim: {
+        Args: { p_limit?: number };
+        Returns: Json;
+      };
+      notification_due: {
+        Args: Record<PropertyKey, never>;
+        Returns: number;
+      };
+      notification_emit: {
+        Args: { p_type: string; p_title: string; p_body: string; p_url?: string; p_dedup?: string; p_data?: Json; p_target?: string; p_kick?: boolean };
+        Returns: number;
+      };
+      notification_fanout: {
+        Args: Record<PropertyKey, never>;
+        Returns: number;
+      };
+      notification_kick: {
+        Args: Record<PropertyKey, never>;
+        Returns: undefined;
+      };
+      notification_not_before: {
+        Args: { p_quiet: boolean; p_urgent: boolean; p_at?: string };
+        Returns: string;
+      };
+      notification_recipients: {
+        Args: { p_type: string; p_target?: string };
+        Returns: Json[];
+      };
       paris_today: {
         Args: Record<PropertyKey, never>;
         Returns: string;
@@ -709,6 +1063,18 @@ export type Database = {
       price_series: {
         Args: { p_from?: string; p_to?: string };
         Returns: Json;
+      };
+      push_subscribe: {
+        Args: { p_endpoint: string; p_p256dh: string; p_auth: string; p_user_agent?: string };
+        Returns: number;
+      };
+      push_unsubscribe: {
+        Args: { p_endpoint: string };
+        Returns: boolean;
+      };
+      track_page_view: {
+        Args: { p_path: string; p_visitor?: string };
+        Returns: undefined;
       };
       upsert_prices: {
         Args: { p_rows: Json; p_source: string; p_mode?: string };

@@ -4,6 +4,7 @@ import { useRegisterSW } from 'virtual:pwa-register/react';
 import { useAuth } from '../lib/auth';
 import { useDashboard } from '../lib/data';
 import { stamp, stampShort } from '../lib/format';
+import { usePageTracking } from '../lib/tracking';
 import { IconChart, IconHistory, IconHome, IconMethod, Logo } from './Icons';
 
 function useOnline(): boolean {
@@ -43,6 +44,7 @@ function UpdateBanner() {
 export default function Layout() {
   const { session, access, signOut } = useAuth();
   const online = useOnline();
+  usePageTracking();
   const canRead = Boolean(access?.can_read);
   const dash = useDashboard();
   const updated = canRead ? (dash.data?.quote_time ?? dash.data?.computed_at ?? null) : null;
