@@ -1,13 +1,11 @@
--- Castor Tracker — installation de la base sur Supabase Cloud.
--- Tableau de bord Supabase › SQL Editor › New query : coller tout ce fichier, puis Run.
--- Une seule fois, sur un projet neuf, après avoir créé le compte administrateur
--- (Authentication › Users › Add user) : s'il est le seul compte du projet, il devient administrateur.
--- Une seule transaction : tout passe ou rien ne passe.
+-- Castor Tracker — base, À COLLER DANS LE SQL EDITOR de Supabase (pas dans Edge Functions).
+-- Tableau de bord Supabase › SQL Editor › New query : coller tout ce fichier, puis Run
+-- (confirmer si Supabase signale des opérations destructives : elles ne visent que les restes d'une installation
+-- interrompue). Créer d'abord le compte administrateur (Authentication › Users › Add user) : s'il est le seul compte
+-- du projet, il devient administrateur.
+-- Relançable sans risque : seules les migrations manquantes sont appliquées (mises à jour comprises).
 -- Fichier généré par scripts/build-cloud-bundle.mjs à partir de supabase/migrations : ne pas modifier.
 
-begin;
-
-set local client_min_messages = warning;
 create schema if not exists castor_meta;
 revoke all on schema castor_meta from public;
 create table if not exists castor_meta.migrations (
@@ -16,7 +14,22 @@ create table if not exists castor_meta.migrations (
   applied_at timestamptz not null default now()
 );
 
--- ═════ 20261007120000_schema.sql ═════
+do $castor$
+declare
+  v_applied integer := 0;
+begin
+  perform set_config('client_min_messages', 'warning', true);
+
+  -- Restes d'une installation interrompue : aucune migration enregistrée, mais des objets Castor présents.
+  if not exists (select 1 from castor_meta.migrations) then
+    drop view if exists public.v_dashboard, public.v_history, public.v_estimate_history, public.v_job_status cascade;
+    drop table if exists public.app_config, public.user_roles, public.stock_prices, public.quote_live, public.market_holidays, public.dividends, public.quadrimesters, public.calc_params, public.estimates, public.backtests, public.job_runs, public.audit_log cascade;
+    drop function if exists public.paris_today, public.has_role, public.is_admin, public.is_public_site, public.can_read, public.my_access, public.set_updated_at, public.audit_trigger, public.price_series, public.upsert_prices, public.admin_import_prices, public.activate_calc_params, public.admin_set_official_price, public.castor_verify_cron_secret, public.castor_set_secret, public.castor_secret, public.castor_call, public.castor_setup_cron, public.castor_unschedule_cron, public.castor_register_endpoint cascade;
+  end if;
+
+  -- ═════ 20261007120000_schema.sql ═════
+  if not exists (select 1 from castor_meta.migrations where filename = '20261007120000_schema.sql') then
+    execute $castor_mig$
 -- Castor Tracker — schéma applicatif.
 -- Instance Supabase dédiée : tout vit dans le schéma public, exposé tel quel par PostgREST.
 -- Lecture : vues et tables sous RLS ; écriture : Edge Functions (service_role) et administrateurs.
@@ -811,10 +824,14 @@ grant execute on function public.admin_import_prices(jsonb, text, boolean), publ
 grant execute on function public.upsert_prices(jsonb, text, text), public.castor_verify_cron_secret(text)
   to service_role;
 grant execute on all functions in schema public to service_role;
+$castor_mig$;
+    insert into castor_meta.migrations (filename, checksum) values ('20261007120000_schema.sql', '5642e04c0bf9a19f');
+    v_applied := v_applied + 1;
+  end if;
 
-insert into castor_meta.migrations (filename, checksum) values ('20261007120000_schema.sql', '5642e04c0bf9a19f');
-
--- ═════ 20261007120100_seed.sql ═════
+  -- ═════ 20261007120100_seed.sql ═════
+  if not exists (select 1 from castor_meta.migrations where filename = '20261007120100_seed.sql') then
+    execute $castor_mig$
 -- Castor Tracker — données de référence initiales.
 -- Prix officiels et dates de CA : avis publiés par VINCI (sources dans notice_url).
 -- Les autres quadrimestres 2018–2025 s'importent depuis le back-office (CSV).
@@ -958,10 +975,14 @@ insert into public.quadrimesters (code, start_date, end_date, payment_close_date
   ('2027/3', '2027-09-01', '2027-12-31', '2027-12-15', null, '2027-06-10', '2027-06-26', 'estimated',
    'Créneau par défaut (CA de juin)', null, null, null)
 on conflict (code) do nothing;
+$castor_mig$;
+    insert into castor_meta.migrations (filename, checksum) values ('20261007120100_seed.sql', 'd3cc2210694eb8d8');
+    v_applied := v_applied + 1;
+  end if;
 
-insert into castor_meta.migrations (filename, checksum) values ('20261007120100_seed.sql', 'd3cc2210694eb8d8');
-
--- ═════ 20261007120200_cron.sql ═════
+  -- ═════ 20261007120200_cron.sql ═════
+  if not exists (select 1 from castor_meta.migrations where filename = '20261007120200_cron.sql') then
+    execute $castor_mig$
 -- Castor Tracker — planification : pg_cron déclenche l'Edge Function castor-jobs via pg_net.
 -- pg_cron compte en UTC : chaque tâche est planifiée aux heures UTC d'été et d'hiver ;
 -- la fonction vérifie l'heure de Paris et l'état de la base pour ne travailler qu'une fois.
@@ -1099,10 +1120,14 @@ $$;
 revoke execute on function public.castor_set_secret(text, text), public.castor_secret(text),
   public.castor_call(text, jsonb), public.castor_setup_cron(), public.castor_unschedule_cron()
   from public, anon, authenticated, service_role;
+$castor_mig$;
+    insert into castor_meta.migrations (filename, checksum) values ('20261007120200_cron.sql', '784b70d3f313b8f5');
+    v_applied := v_applied + 1;
+  end if;
 
-insert into castor_meta.migrations (filename, checksum) values ('20261007120200_cron.sql', '784b70d3f313b8f5');
-
--- ═════ 20261008120000_cloud_api_keys.sql ═════
+  -- ═════ 20261008120000_cloud_api_keys.sql ═════
+  if not exists (select 1 from castor_meta.migrations where filename = '20261008120000_cloud_api_keys.sql') then
+    execute $castor_mig$
 -- Castor Tracker — compatibilité avec les clés d'API de Supabase Cloud (publishable / secret).
 -- Les nouvelles clés (sb_publishable_…, sb_secret_…) ne sont pas des JWT : elles passent dans l'en-tête
 -- apikey, jamais en « Authorization: Bearer », que la passerelle refuserait. Une clé anon historique
@@ -1139,10 +1164,14 @@ end;
 $$;
 
 revoke execute on function public.castor_call(text, jsonb) from public, anon, authenticated, service_role;
+$castor_mig$;
+    insert into castor_meta.migrations (filename, checksum) values ('20261008120000_cloud_api_keys.sql', 'f47bf5bdef91970f');
+    v_applied := v_applied + 1;
+  end if;
 
-insert into castor_meta.migrations (filename, checksum) values ('20261008120000_cloud_api_keys.sql', 'f47bf5bdef91970f');
-
--- ═════ 20261008150000_self_register.sql ═════
+  -- ═════ 20261008150000_self_register.sql ═════
+  if not exists (select 1 from castor_meta.migrations where filename = '20261008150000_self_register.sql') then
+    execute $castor_mig$
 -- Castor Tracker — installation sans script (Supabase Cloud, éditeur SQL du tableau de bord).
 -- castor-jobs enregistre elle-même son adresse dans Vault au premier appel d'un administrateur :
 -- aucune URL ni aucun secret à saisir à la main. Une valeur déjà présente (posée par
@@ -1180,20 +1209,25 @@ $$;
 
 revoke execute on function public.castor_register_endpoint(text) from public, anon, authenticated;
 grant execute on function public.castor_register_endpoint(text) to service_role;
+$castor_mig$;
+    insert into castor_meta.migrations (filename, checksum) values ('20261008150000_self_register.sql', '13409b8338911e33');
+    v_applied := v_applied + 1;
+  end if;
 
-insert into castor_meta.migrations (filename, checksum) values ('20261008150000_self_register.sql', '13409b8338911e33');
-
--- ═════ Configuration ═════
--- Secret des tâches planifiées : aléatoire, conservé dans Vault, jamais affiché.
-select public.castor_set_secret('castor_cron_secret', replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', ''))
-where public.castor_secret('castor_cron_secret') is null;
-select public.castor_setup_cron();
--- Administrateur : le seul compte du projet.
-insert into public.user_roles (user_id, role)
-select id, 'admin' from auth.users where (select count(*) from auth.users) = 1
-on conflict (user_id) do update set role = 'admin';
-
-commit;
+  -- ═════ Configuration ═════
+  -- Secret des tâches planifiées : aléatoire, conservé dans Vault, jamais affiché.
+  if public.castor_secret('castor_cron_secret') is null then
+    perform public.castor_set_secret('castor_cron_secret', replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', ''));
+  end if;
+  perform public.castor_setup_cron();
+  -- Administrateur : le seul compte du projet, si aucun administrateur n'existe encore.
+  if not exists (select 1 from public.user_roles where role = 'admin') and (select count(*) from auth.users) = 1 then
+    insert into public.user_roles (user_id, role) select id, 'admin' from auth.users
+    on conflict (user_id) do update set role = 'admin';
+  end if;
+  raise warning 'Castor Tracker : % migration(s) appliquée(s)', v_applied;
+end
+$castor$;
 
 notify pgrst, 'reload schema';
 
@@ -1201,7 +1235,7 @@ select
   (select count(*) from castor_meta.migrations) as migrations,
   coalesce(
     (select string_agg(u.email, ', ') from public.user_roles r join auth.users u on u.id = r.user_id where r.role = 'admin'),
-    'aucun : voir la ligne à adapter en fin de fichier'
+    'aucun : créer le compte (Authentication › Users › Add user) puis relancer'
   ) as administrateur,
   (select string_agg(extname, ', ' order by extname) from pg_extension where extname in ('pg_cron', 'pg_net')) as extensions;
 

@@ -37,7 +37,7 @@ Le même moteur de calcul (`packages/core`) sert à la fonction et au simulateur
 | `supabase/functions/castor-jobs` | Edge Function unique (Deno) |
 | `supabase/tests` | Doublures Supabase, tests SQL des droits, test de bout en bout de la fonction |
 | `scripts` | Configuration de l'instance, déploiement des fonctions, sauvegarde, tests de base |
-| `deploy` | Installation sur Supabase Cloud par copier-coller : base (SQL) et fonction en un seul fichier (générés) |
+| `deploy` | Installation sur Supabase Cloud par copier-coller : base (SQL Editor) et fonction en un seul fichier (Edge Functions), générés |
 
 ## Développement
 
@@ -70,22 +70,26 @@ un **Supabase auto-hébergé** dans Coolify. La PWA est toujours une application
 ### A. Supabase Cloud
 
 Tout se fait dans le tableau de bord Supabase, sans outil à installer ni secret à confier à GitHub : deux fichiers
-du dossier `deploy/` sont à copier-coller (bouton *Copy raw file* sur GitHub).
+du dossier `deploy/` sont à copier-coller (bouton *Copy raw file* sur GitHub), chacun à un endroit différent.
 
 1. **Projet** : supabase.com › *New project*, région Paris (`eu-west-3`).
 2. **Compte administrateur** : *Authentication › Users › Add user › Create new user*, e-mail et mot de passe,
    « Auto Confirm User » coché. Dans *Authentication › Sign In / Providers*, désactiver
    « Allow new users to sign up » (accès sur invitation).
-3. **Base** : *SQL Editor › New query*, coller tout `deploy/supabase-cloud.sql`, *Run*. Le résultat affiche
-   5 migrations et l'e-mail de l'administrateur (le seul compte du projet).
+3. **Base** : *SQL Editor › New query*, coller tout `deploy/1-base-a-coller-dans-SQL-Editor.sql`, *Run* (confirmer
+   si Supabase signale des opérations destructives : elles ne visent que les restes d'une installation interrompue).
+   Le résultat affiche 5 migrations et l'e-mail de l'administrateur (le seul compte du projet).
 4. **Fonction** : *Edge Functions › Deploy a new function › Via Editor*, nom `castor-jobs`, remplacer le contenu
-   de `index.ts` par `deploy/castor-jobs.js`, *Deploy function*. Dans les réglages de la fonction, désactiver la
-   vérification JWT (« Verify JWT » / « Enforce JWT verification ») : la fonction contrôle elle-même ses appels.
+   de `index.ts` par `deploy/2-fonction-a-coller-dans-Edge-Functions.js`, *Deploy function*. Dans les réglages de la
+   fonction, désactiver la vérification JWT (« Verify JWT » / « Enforce JWT verification ») : la fonction contrôle
+   elle-même ses appels.
 5. **Premier appel** : une fois la PWA branchée (section C), *Admin › Données de cours* › reprise de l'historique.
    Ce premier appel d'administrateur enregistre l'adresse de la fonction et active les tâches planifiées.
 
-Mises à jour : pour une nouvelle migration, coller ce seul fichier dans l'éditeur SQL ; pour une fonction modifiée,
-recoller `deploy/castor-jobs.js` (régénéré par `node scripts/build-cloud-bundle.mjs`, contrôlé par la CI).
+Le fichier SQL est relançable sans risque : il n'applique que les migrations manquantes, et supprime d'abord les
+restes d'une installation interrompue. Mises à jour : recoller la dernière version du fichier SQL ; pour une fonction
+modifiée, recoller le fichier `.js` (les deux sont régénérés par `node scripts/build-cloud-bundle.mjs`, la CI vérifie
+qu'ils sont à jour).
 
 Variante automatisée : le workflow `.github/workflows/supabase-cloud.yml` fait les étapes 3 à 5 à chaque push, à
 condition de créer deux secrets GitHub (`SUPABASE_ACCESS_TOKEN`, `SUPABASE_DB_URL`) ; sans eux il ne fait rien.

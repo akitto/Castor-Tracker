@@ -1,4 +1,4 @@
-// Castor Tracker — fonction castor-jobs en un seul fichier, pour Supabase Cloud.
+// Castor Tracker — fonction castor-jobs, À COLLER DANS EDGE FUNCTIONS (pas dans le SQL Editor).
 // Tableau de bord Supabase › Edge Functions › Deploy a new function › Via Editor :
 //   nom de la fonction : castor-jobs ; remplacer tout le contenu de index.ts par ce fichier ; Deploy function.
 // Puis, dans les réglages de la fonction, désactiver la vérification JWT (« Verify JWT ») :
