@@ -69,6 +69,20 @@ async function withJobLog(ctx: JobContext, job: string, run: () => Promise<JobRe
   }
 }
 
+/**
+ * Au premier appel d'un administrateur, enregistre dans Vault l'adresse des fonctions (et, si besoin, le secret
+ * et les tâches planifiées) : l'installation par l'éditeur SQL de Supabase Cloud n'a rien à saisir à la main.
+ * Sans effet si la configuration existe déjà (scripts/configure-supabase.sh en auto-hébergement).
+ */
+let endpointRegistered = false;
+async function registerEndpoint(db: Db): Promise<void> {
+  const url = Deno.env.get('SUPABASE_URL');
+  if (endpointRegistered || !url) return;
+  const { error } = await db.rpc('castor_register_endpoint', { p_url: `${url.replace(/\/+$/, '')}/functions/v1` });
+  if (error) console.error('castor-jobs : enregistrement de l’adresse des fonctions :', error.message);
+  else endpointRegistered = true;
+}
+
 export async function handle(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method === 'GET') return json({ ok: true, service: 'castor-jobs', core: CORE_VERSION });
@@ -82,6 +96,7 @@ export async function handle(req: Request): Promise<Response> {
     const db = serviceClient();
     const caller = await authenticate(req, db);
     if (caller.trigger === 'cron' && !def.cron) throw new HttpError(403, `tâche ${task} non planifiable`);
+    if (caller.trigger === 'admin') await registerEndpoint(db);
     const now = new Date();
     const ctx: JobContext = { db, caller, body, clock: parisClock(now), now };
     if (caller.trigger === 'cron' && def.gate) {

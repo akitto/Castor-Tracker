@@ -145,6 +145,9 @@ Deno.test('authentification et routage', async () => {
 Deno.test('reprise de l’historique, recalcul et estimation', async () => {
   const history = await call({ task: 'history', from: '2015-01-01' }, adminHeaders);
   assert(history.status === 200, `historique : ${JSON.stringify(history.body)}`);
+  // Le premier appel admin a enregistré l'adresse des fonctions ; une seconde adresse ne la remplace pas.
+  const reg = await db.rpc('castor_register_endpoint', { p_url: 'https://autre.example/functions/v1' });
+  assert(reg.data === 'déjà en place', `adresse des fonctions enregistrée au premier appel admin : ${JSON.stringify(reg)}`);
   const { count } = await db.from('stock_prices').select('trade_date', { count: 'exact', head: true });
   assert((count ?? 0) >= sessions.length - 1, `séances en base : ${count}`);
   const divs = await db.from('dividends').select('ex_date');

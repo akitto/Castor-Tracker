@@ -222,5 +222,18 @@ select tests.ok(not public.castor_verify_cron_secret('court'), 'secret trop cour
 select tests.fails($$select public.castor_call('open')$$, 'appel planifié réservé au propriétaire');
 rollback;
 
+-- Enregistrement de l'adresse des fonctions par castor-jobs (installation par l'éditeur SQL)
+begin;
+select set_config('role', 'authenticated', true);
+select tests.fails($$select public.castor_register_endpoint('https://pirate.example/functions/v1')$$, 'enregistrement refusé aux comptes');
+select set_config('role', 'service_role', true);
+select tests.ok(public.castor_register_endpoint('pas une adresse') = 'adresse refusée', 'adresse invalide refusée');
+select tests.ok(public.castor_register_endpoint('https://abc.supabase.co/functions/v1/') like 'adresse des fonctions, secret des tâches%', 'premier enregistrement : adresse et secret');
+select tests.ok(public.castor_register_endpoint('https://autre.example/functions/v1') = 'déjà en place', 'second enregistrement sans effet');
+reset role;
+select tests.ok(public.castor_secret('castor_functions_url') = 'https://abc.supabase.co/functions/v1', 'adresse conservée, sans barre finale');
+select tests.ok(length(public.castor_secret('castor_cron_secret')) = 64, 'secret aléatoire de 64 caractères');
+rollback;
+
 \o
 \echo 'Tous les tests SQL sont passés.'

@@ -662,6 +662,10 @@ export type Database = {
         Args: { p_task: string; p_body?: Json };
         Returns: number;
       };
+      castor_register_endpoint: {
+        Args: { p_url: string };
+        Returns: string;
+      };
       castor_secret: {
         Args: { p_name: string };
         Returns: string;

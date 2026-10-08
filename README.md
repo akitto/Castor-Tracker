@@ -37,6 +37,7 @@ Le même moteur de calcul (`packages/core`) sert à la fonction et au simulateur
 | `supabase/functions/castor-jobs` | Edge Function unique (Deno) |
 | `supabase/tests` | Doublures Supabase, tests SQL des droits, test de bout en bout de la fonction |
 | `scripts` | Configuration de l'instance, déploiement des fonctions, sauvegarde, tests de base |
+| `deploy` | Installation sur Supabase Cloud par copier-coller : base (SQL) et fonction en un seul fichier (générés) |
 
 ## Développement
 
@@ -68,29 +69,26 @@ un **Supabase auto-hébergé** dans Coolify. La PWA est toujours une application
 
 ### A. Supabase Cloud
 
-1. **Projet** : supabase.com › *New project*, région Paris (`eu-west-3`), mot de passe de base généré
-   (lettres et chiffres seulement : il entre tel quel dans une URL).
-2. **Authentification** :
-   - *Authentication › Sign In / Providers* : désactiver « Allow new users to sign up » (accès sur invitation),
-     garder le fournisseur Email ;
-   - *Authentication › URL Configuration* : Site URL `https://castor.<domaine>`, Redirect URLs
-     `https://castor.<domaine>/**` ;
-   - *Authentication › Users › Add user › Create new user* : e-mail et mot de passe de l'administrateur,
-     « Auto Confirm User » coché.
-3. **Deux secrets dans le dépôt GitHub** (*Settings › Secrets and variables › Actions › New repository secret*) :
+Tout se fait dans le tableau de bord Supabase, sans outil à installer ni secret à confier à GitHub : deux fichiers
+du dossier `deploy/` sont à copier-coller (bouton *Copy raw file* sur GitHub).
 
-   | Nom | Valeur |
-   | --- | --- |
-   | `SUPABASE_ACCESS_TOKEN` | jeton personnel Supabase : avatar › *Access Tokens* › *Generate new token* |
-   | `SUPABASE_DB_URL` | bouton *Connect* du projet › Session pooler › URI, `[YOUR-PASSWORD]` remplacé par le mot de passe de la base |
+1. **Projet** : supabase.com › *New project*, région Paris (`eu-west-3`).
+2. **Compte administrateur** : *Authentication › Users › Add user › Create new user*, e-mail et mot de passe,
+   « Auto Confirm User » coché. Dans *Authentication › Sign In / Providers*, désactiver
+   « Allow new users to sign up » (accès sur invitation).
+3. **Base** : *SQL Editor › New query*, coller tout `deploy/supabase-cloud.sql`, *Run*. Le résultat affiche
+   5 migrations et l'e-mail de l'administrateur (le seul compte du projet).
+4. **Fonction** : *Edge Functions › Deploy a new function › Via Editor*, nom `castor-jobs`, remplacer le contenu
+   de `index.ts` par `deploy/castor-jobs.js`, *Deploy function*. Dans les réglages de la fonction, désactiver la
+   vérification JWT (« Verify JWT » / « Enforce JWT verification ») : la fonction contrôle elle-même ses appels.
+5. **Premier appel** : une fois la PWA branchée (section C), *Admin › Données de cours* › reprise de l'historique.
+   Ce premier appel d'administrateur enregistre l'adresse de la fonction et active les tâches planifiées.
 
-   Facultatif : secret `ADMIN_EMAIL` (seulement si le projet compte plusieurs comptes), variable `SITE_URL`.
-4. **Déploiement** : *Actions › Supabase Cloud › Run workflow*. Le workflow déploie `castor-jobs`
-   (`--no-verify-jwt` : la fonction contrôle elle-même ses appels), applique les migrations, écrit les secrets Vault,
-   crée les tâches pg_cron, donne le rôle admin au compte créé à l'étape 2 (seul compte du projet, ou `ADMIN_EMAIL`)
-   et lance la reprise de l'historique. Il se relance seul à chaque push qui touche `supabase/` ou le moteur.
-5. **E-mails** (facultatif) : *Authentication › Emails* : coller les modèles de `apps/web/public/email/`
-   (code à 6 chiffres pour se connecter depuis l'application installée).
+Mises à jour : pour une nouvelle migration, coller ce seul fichier dans l'éditeur SQL ; pour une fonction modifiée,
+recoller `deploy/castor-jobs.js` (régénéré par `node scripts/build-cloud-bundle.mjs`, contrôlé par la CI).
+
+Variante automatisée : le workflow `.github/workflows/supabase-cloud.yml` fait les étapes 3 à 5 à chaque push, à
+condition de créer deux secrets GitHub (`SUPABASE_ACCESS_TOKEN`, `SUPABASE_DB_URL`) ; sans eux il ne fait rien.
 
 Limite du cloud : une Edge Function dispose de 2 s de CPU par appel. Le rejeu (REC-05) réduit seul ses tirages et
 espace les jours rejoués pour tenir dans ce budget ; le message de la tâche l'indique.
@@ -156,7 +154,8 @@ Restauration à tester sur une instance de test (REC-11).
 ### F. Intégration continue
 
 - `.github/workflows/ci.yml` : tests du moteur, typage, build, migrations + tests de droits + test de bout en bout.
-- `.github/workflows/supabase-cloud.yml` : déploiement sur Supabase Cloud (section A).
+- `.github/workflows/supabase-cloud.yml` : déploiement automatisé sur Supabase Cloud (variante de la section A).
+- La CI vérifie aussi que `deploy/` correspond au code (`node scripts/build-cloud-bundle.mjs`).
 - `.github/workflows/deploy.yml` : migrations et déploiement de la fonction sur un runner auto-hébergé du homelab
   (section B ; activer avec la variable de dépôt `CASTOR_DEPLOY_ENABLED=true`).
 

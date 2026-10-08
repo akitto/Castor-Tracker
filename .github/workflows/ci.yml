@@ -42,3 +42,22 @@ jobs:
           cd supabase/functions
           deno check --config deno.json castor-jobs/index.ts
           deno lint --config deno.json castor-jobs/
+
+  bundle:
+    name: Fichiers d'installation Supabase Cloud à jour
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.6
+      - run: node scripts/build-cloud-bundle.mjs
+      - name: deploy/ correspond au code
+        run: |
+          git diff --exit-code -- deploy/ || {
+            echo "::error::deploy/ n'est pas à jour : lancer node scripts/build-cloud-bundle.mjs puis committer"
+            exit 1
+          }
