@@ -1,14 +1,14 @@
 name: Supabase Cloud
 
 # Déploie la fonction castor-jobs et configure la base d'un projet Supabase Cloud :
-# migrations, secrets Vault, tâches pg_cron, rôle du premier administrateur, reprise de l'historique.
-# Inactif tant que la variable de dépôt SUPABASE_PROJECT_REF n'existe pas.
+# migrations, secrets Vault, tâches pg_cron, rôle administrateur, reprise de l'historique.
 #
-# Settings › Secrets and variables › Actions
-#   Variables : SUPABASE_PROJECT_REF, SUPABASE_PUBLISHABLE_KEY, SITE_URL
-#   Secrets   : SUPABASE_ACCESS_TOKEN (jeton personnel), SUPABASE_DB_URL (connexion « Session pooler »),
-#               SUPABASE_SECRET_KEY, ADMIN_EMAIL (en secret : les journaux d'un dépôt public sont publics)
-# Le compte ADMIN_EMAIL se crée d'abord dans Supabase (Authentication › Users › Add user).
+# Deux secrets suffisent (Settings › Secrets and variables › Actions › New repository secret) :
+#   SUPABASE_ACCESS_TOKEN  jeton personnel Supabase (avatar › Access Tokens › Generate new token)
+#   SUPABASE_DB_URL        bouton « Connect » du projet › Session pooler › URI, [YOUR-PASSWORD] remplacé
+# Le compte administrateur se crée d'abord dans Supabase (Authentication › Users › Add user) : s'il est le seul
+# compte du projet, il devient administrateur. Facultatif : secret ADMIN_EMAIL, variables SITE_URL et
+# SUPABASE_PUBLISHABLE_KEY. Sans les deux secrets, le workflow ne fait rien (et échoue s'il est lancé à la main).
 
 on:
   workflow_dispatch:
@@ -32,44 +32,48 @@ concurrency:
 jobs:
   deploy:
     name: Fonction castor-jobs et base
-    if: vars.SUPABASE_PROJECT_REF != ''
     runs-on: ubuntu-24.04
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-      PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
-      SUPABASE_URL: https://${{ vars.SUPABASE_PROJECT_REF }}.supabase.co
-      SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
-      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
       DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
-      SITE_URL: ${{ vars.SITE_URL }}
       ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+      SITE_URL: ${{ vars.SITE_URL }}
+      SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Contrôle des réglages
+      - name: Réglages
+        id: cfg
         run: |
-          missing=""
-          for name in SUPABASE_ACCESS_TOKEN SUPABASE_PUBLISHABLE_KEY SUPABASE_SECRET_KEY DATABASE_URL; do
-            [ -n "${!name}" ] || missing="$missing $name"
-          done
-          if [ -n "$missing" ]; then
-            echo "::error::réglages manquants :$missing (voir l'en-tête de .github/workflows/supabase-cloud.yml)"
-            exit 1
+          if [ -z "$SUPABASE_ACCESS_TOKEN" ] || [ -z "$DATABASE_URL" ]; then
+            msg="secrets SUPABASE_ACCESS_TOKEN et SUPABASE_DB_URL à créer dans Settings › Secrets and variables › Actions"
+            if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then echo "::error::$msg"; exit 1; fi
+            echo "::notice::$msg (rien déployé)"; echo "ready=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
           case "$DATABASE_URL" in
             *YOUR-PASSWORD*|*'['*) echo "::error::SUPABASE_DB_URL contient encore [YOUR-PASSWORD] : y mettre le mot de passe de la base"; exit 1 ;;
           esac
-          command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client; }
+          # Identifiant du projet : utilisateur postgres.<ref> (pooler) ou hôte db.<ref>.supabase.co (connexion directe).
+          ref="$(printf '%s' "$DATABASE_URL" | sed -n 's#^postgres[a-z]*://postgres\.\([a-z0-9]\{20\}\):.*#\1#p')"
+          [ -n "$ref" ] || ref="$(printf '%s' "$DATABASE_URL" | sed -n 's#.*@db\.\([a-z0-9]\{20\}\)\.supabase\.co.*#\1#p')"
+          [ -n "$ref" ] || { echo "::error::identifiant du projet introuvable dans SUPABASE_DB_URL (prendre l'URI « Session pooler »)"; exit 1; }
+          echo "PROJECT_REF=$ref" >> "$GITHUB_ENV"
+          echo "SUPABASE_URL=https://$ref.supabase.co" >> "$GITHUB_ENV"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@v4
+      - if: steps.cfg.outputs.ready == 'true'
+        uses: actions/checkout@v4
+
+      - if: steps.cfg.outputs.ready == 'true'
+        uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - uses: supabase/setup-cli@v1
+      - if: steps.cfg.outputs.ready == 'true'
+        uses: supabase/setup-cli@v1
         with:
           version: latest
 
       - name: Déploiement de castor-jobs
+        if: steps.cfg.outputs.ready == 'true'
         run: |
           node scripts/sync-core.mjs
           # La fonction contrôle elle-même ses appels (secret Vault des tâches, JWT admin + TOTP) :
@@ -77,6 +81,9 @@ jobs:
           supabase functions deploy castor-jobs --project-ref "$PROJECT_REF" --no-verify-jwt --use-api
 
       - name: Configuration de la base
+        if: steps.cfg.outputs.ready == 'true'
         env:
           ROTATE: ${{ inputs.rotate_secret && '--rotate-secret' || '' }}
-        run: bash scripts/configure-supabase.sh $ROTATE
+        run: |
+          command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client; }
+          bash scripts/configure-supabase.sh $ROTATE

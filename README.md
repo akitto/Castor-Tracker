@@ -77,22 +77,18 @@ un **Supabase auto-hébergé** dans Coolify. La PWA est toujours une application
      `https://castor.<domaine>/**` ;
    - *Authentication › Users › Add user › Create new user* : e-mail et mot de passe de l'administrateur,
      « Auto Confirm User » coché.
-3. **Réglages du dépôt GitHub** (*Settings › Secrets and variables › Actions*) :
+3. **Deux secrets dans le dépôt GitHub** (*Settings › Secrets and variables › Actions › New repository secret*) :
 
-   | Nom | Type | Valeur |
-   | --- | --- | --- |
-   | `SUPABASE_PROJECT_REF` | variable | identifiant du projet, celui de `https://<ref>.supabase.co` |
-   | `SUPABASE_PUBLISHABLE_KEY` | variable | *Settings › API Keys* : Publishable key (`sb_publishable_…`) |
-   | `SITE_URL` | variable | `https://castor.<domaine>` |
-   | `SUPABASE_SECRET_KEY` | secret | *Settings › API Keys* : Secret key (`sb_secret_…`) |
-   | `SUPABASE_DB_URL` | secret | bouton *Connect* › Session pooler › URI, `[YOUR-PASSWORD]` remplacé |
-   | `SUPABASE_ACCESS_TOKEN` | secret | *Account › Access Tokens › Generate new token* |
-   | `ADMIN_EMAIL` | secret | e-mail du compte créé à l'étape 2 (en secret : les journaux d'un dépôt public sont publics) |
+   | Nom | Valeur |
+   | --- | --- |
+   | `SUPABASE_ACCESS_TOKEN` | jeton personnel Supabase : avatar › *Access Tokens* › *Generate new token* |
+   | `SUPABASE_DB_URL` | bouton *Connect* du projet › Session pooler › URI, `[YOUR-PASSWORD]` remplacé par le mot de passe de la base |
 
+   Facultatif : secret `ADMIN_EMAIL` (seulement si le projet compte plusieurs comptes), variable `SITE_URL`.
 4. **Déploiement** : *Actions › Supabase Cloud › Run workflow*. Le workflow déploie `castor-jobs`
    (`--no-verify-jwt` : la fonction contrôle elle-même ses appels), applique les migrations, écrit les secrets Vault,
-   crée les tâches pg_cron, donne le rôle admin au compte `ADMIN_EMAIL` et lance la reprise de l'historique.
-   Il se relance seul à chaque push qui touche `supabase/` ou le moteur.
+   crée les tâches pg_cron, donne le rôle admin au compte créé à l'étape 2 (seul compte du projet, ou `ADMIN_EMAIL`)
+   et lance la reprise de l'historique. Il se relance seul à chaque push qui touche `supabase/` ou le moteur.
 5. **E-mails** (facultatif) : *Authentication › Emails* : coller les modèles de `apps/web/public/email/`
    (code à 6 chiffres pour se connecter depuis l'application installée).
 

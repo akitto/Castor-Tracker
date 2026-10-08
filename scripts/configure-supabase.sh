@@ -3,7 +3,7 @@
 #   1. applique les migrations SQL non encore appliquées (suivi dans castor_meta.migrations) ;
 #   2. écrit les secrets Vault (URL des fonctions, secret des tâches planifiées, clé publique) ;
 #   3. renseigne l'adresse du site, (re)crée les tâches pg_cron, recharge le schéma PostgREST ;
-#   4. crée le premier administrateur (ADMIN_EMAIL) s'il n'existe pas ;
+#   4. crée le premier administrateur (ADMIN_EMAIL), ou promeut le seul compte du projet ;
 #   5. vérifie la fonction castor-jobs et lance la reprise de l'historique si la base est vide.
 # Usage : bash scripts/configure-supabase.sh [--migrations-only] [--rotate-secret]
 # Supabase Cloud : DATABASE_URL (connexion « Session pooler »), SUPABASE_PUBLISHABLE_KEY, SUPABASE_SECRET_KEY ;
@@ -40,6 +40,8 @@ SUPABASE_SERVICE_ROLE_KEY="${SUPABASE_SECRET_KEY:-${SUPABASE_SERVICE_ROLE_KEY:-}
 # En-têtes d'authentification d'une clé : apikey toujours, Bearer seulement pour une clé JWT
 # (les clés sb_publishable_… / sb_secret_… ne sont pas des JWT et seraient refusées en Bearer).
 auth_args() {
+  AUTH_ARGS=()
+  [ -n "$1" ] || return 0
   AUTH_ARGS=(-H "apikey: $1")
   case "$1" in eyJ*) AUTH_ARGS+=(-H "Authorization: Bearer $1") ;; esac
 }
@@ -93,7 +95,6 @@ psql_cmd -c "notify pgrst, 'reload schema';" >/dev/null
 [ "$MIGRATIONS_ONLY" = "1" ] && { say "migrations à jour"; exit 0; }
 
 : "${SUPABASE_URL:?SUPABASE_URL manquant dans $ENV_FILE}"
-: "${SUPABASE_ANON_KEY:?clé publique manquante : SUPABASE_PUBLISHABLE_KEY (ou SUPABASE_ANON_KEY) dans $ENV_FILE}"
 SUPABASE_URL="${SUPABASE_URL%/}"
 FUNCTIONS_URL="${CASTOR_FUNCTIONS_URL:-$SUPABASE_URL/functions/v1}"
 
@@ -109,11 +110,19 @@ select public.castor_set_secret('castor_cron_secret', :'s');
 SQL
   echo "  secret des tâches planifiées $([ -n "$current" ] && echo renouvelé || echo créé)"
 fi
-psql_cmd -v url="${FUNCTIONS_URL%/}" -v anon="$SUPABASE_ANON_KEY" <<'SQL' >/dev/null
+psql_cmd -v url="${FUNCTIONS_URL%/}" <<'SQL' >/dev/null
 select public.castor_set_secret('castor_functions_url', :'url');
-select public.castor_set_secret('castor_anon_key', :'anon');
 SQL
 echo "  fonctions appelées sur ${FUNCTIONS_URL%/}"
+# Clé publique jointe aux appels planifiés : indispensable en auto-hébergement (VERIFY_JWT=true),
+# inutile sur Supabase Cloud où castor-jobs est déployée sans vérification JWT (--no-verify-jwt).
+if [ -n "$SUPABASE_ANON_KEY" ]; then
+  psql_cmd -v anon="$SUPABASE_ANON_KEY" <<'SQL' >/dev/null
+select public.castor_set_secret('castor_anon_key', :'anon');
+SQL
+else
+  echo "  pas de clé publique fournie : appels planifiés authentifiés par le seul secret des tâches"
+fi
 
 if [ -n "${SITE_URL:-}" ]; then
   psql_cmd -v site="${SITE_URL%/}" <<'SQL' >/dev/null
@@ -160,6 +169,24 @@ insert into public.user_roles (user_id, role) values (:'uid'::uuid, 'admin')
 on conflict (user_id) do update set role = 'admin';
 SQL
   echo "  rôle admin attribué (TOTP demandé à la première connexion à l’administration)"
+else
+  # Sans ADMIN_EMAIL : si le projet ne compte qu'un compte et aucun administrateur, ce compte le devient.
+  say "administrateur"
+  admins="$(sql_value -c "select count(*) from public.user_roles where role = 'admin'")"
+  users="$(sql_value -c 'select count(*) from auth.users')"
+  if [ "$admins" != "0" ]; then
+    echo "  administrateur déjà défini"
+  elif [ "$users" = "1" ]; then
+    psql_cmd <<'SQL' >/dev/null
+insert into public.user_roles (user_id, role) select id, 'admin' from auth.users
+on conflict (user_id) do update set role = 'admin';
+SQL
+    echo "  le seul compte du projet devient administrateur (TOTP demandé à la première connexion à l’administration)"
+  elif [ "$users" = "0" ]; then
+    warn "aucun compte : créer le compte administrateur dans Supabase (Authentication › Users › Add user), puis relancer"
+  else
+    warn "plusieurs comptes et aucun administrateur : préciser ADMIN_EMAIL, puis relancer"
+  fi
 fi
 
 say "fonction castor-jobs"
